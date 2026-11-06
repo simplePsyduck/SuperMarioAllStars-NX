@@ -205,8 +205,12 @@ void App::frameLauncher(double dt, int gameFrames) {
         break;
       case Launcher::kCredits: push(pageCredits()); break;
       case Launcher::kPatreon:
+#ifdef __SWITCH__
+        menu.notify("patreon.com/TeamRedTail", 4.0f);  // (the console has no browser to hand a link to)
+#else
         openUrl("https://www.patreon.com/TeamRedTail");
         menu.notify("Opened Patreon in your browser");
+#endif
         break;
       case Launcher::kQuit:
         if (mi.back) {
@@ -571,8 +575,14 @@ MenuInput App::menuInput() {
     nav[1] |= p->buttons[11] || p->axes[1] > dz;
     nav[2] |= p->buttons[12] || p->axes[0] < -dz;
     nav[3] |= p->buttons[13] || p->axes[0] > dz;
+#ifdef __SWITCH__
+    // (the buttons are by position: Nintendo's A, the right one, confirms and B, the bottom one, goes back)
+    nav[4] |= p->buttons[1] || p->buttons[7];
+    nav[5] |= p->buttons[0] || p->buttons[6];
+#else
     nav[4] |= p->buttons[0] || p->buttons[7];
     nav[5] |= p->buttons[1] || p->buttons[6];
+#endif
     nav[6] |= p->buttons[4];
     nav[7] |= p->buttons[5];
   }
@@ -1301,7 +1311,7 @@ std::shared_ptr<MenuPage> App::pageControls() {
                                         "left stick button or Menu > Press Select In Game."));
     pg.items.push_back(MenuItem::slider("Stick Deadzone", 10, 80, 5, [this]() { return cfg.deadzone; },
                                         [this](int v) { cfg.deadzone = v; }, "%"));
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__SWITCH__)
     pg.items.push_back(MenuItem::header("Touch screen"));
     pg.items.push_back(MenuItem::choice("On-Screen Controls", {"While Touching", "Always", "Never"},
                                         [this]() { return cfg.touchMode; }, [this](int v) { cfg.touchMode = v; },

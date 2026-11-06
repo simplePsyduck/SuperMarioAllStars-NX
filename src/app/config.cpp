@@ -74,9 +74,16 @@ static std::string keyName(int vk) {
 }
 
 std::string bindingName(const Binding& b) {
+#ifdef __SWITCH__
+  // (the buttons are by position, so the Switch's A, the right one, is the standard layout's B)
+  static const char* padNames[16] = {"B", "A", "Y", "X", "L", "R", "Minus", "Plus",
+                                     "L-Stick Press", "R-Stick Press", "D-Pad Up", "D-Pad Down",
+                                     "D-Pad Left", "D-Pad Right", "ZL", "ZR"};
+#else
   static const char* padNames[16] = {"A", "B", "X", "Y", "LB", "RB", "View/Select", "Menu/Start",
                                      "L-Stick Press", "R-Stick Press", "D-Pad Up", "D-Pad Down",
                                      "D-Pad Left", "D-Pad Right", "LT", "RT"};
+#endif
   static const char* axisNames[6] = {"L-Stick X", "L-Stick Y", "R-Stick X", "R-Stick Y", "Axis 5", "Axis 6"};
   switch (b.type) {
     case Binding::None: return "-";

@@ -45,6 +45,11 @@ bool writeFileSafely(const std::string& path, const void* data, size_t n) {
   bool ok = fwrite(data, 1, n, f) == n;
   ok = fflush(f) == 0 && ok;
   ok = fclose(f) == 0 && ok;
+#ifdef __SWITCH__
+  // (the SD card's FAT refuses to rename over an existing file, so the old one goes first: a power cut in
+  // that instant leaves the complete new data in the .tmp file, not a half-written save)
+  if (ok) std::remove(path.c_str());
+#endif
   if (ok) ok = std::rename(tmp.c_str(), path.c_str()) == 0;
   if (!ok) std::remove(tmp.c_str());
   return ok;

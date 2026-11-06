@@ -52,6 +52,7 @@ private:
   unsigned prog_ = 0, vao_ = 0, tex_ = 0, samplers_[2] = {};
   int texW_ = 0, texH_ = 0;
   int loc_[12] = {};
+  bool liteShader_ = false;  // (the plain picture shader is in use: see Video::init)
   std::unique_ptr<GlesCanvas> canvas_;
   void pass(const VideoParams& p, int pass, int x, int y, int w, int h);
 };

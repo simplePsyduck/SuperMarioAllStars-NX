@@ -2,18 +2,54 @@
 #include "platform/android/video_gles.h"
 #include <SDL.h>
 #include <GLES3/gl3.h>
+#ifdef __SWITCH__
+#include "platform/switch/glyphs_nx.h"
+#include "platform/switch/nx_sys.h"  // (not libnx itself: only nx_sys.cpp includes <switch.h>)
+#else
 #include <android/log.h>
 #include <jni.h>
+#endif
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
 
+#ifdef __SWITCH__
+void logf(const char* fmt, ...);  // (the app's log file, smas_port.log: see app/app.cpp)
+#endif
+
 namespace {
 
+#ifdef __SWITCH__
+// (stderr goes nowhere on a Switch: the shader and GL messages go to smas_port.log)
+void logError(const char* msg) { logf("GL error: %s", msg); }
+void logInfo(const char* fmt, ...) {
+  char buf[512];
+  va_list ap;
+  va_start(ap, fmt);
+  std::vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  logf("%s", buf);
+}
+// Reports (and clears) what the driver has flagged since the last look; the log keeps the first few only.
+void checkGl(const char* where) {
+  static int budget = 40;
+  for (int i = 0; i < 8; i++) {
+    GLenum e = glGetError();
+    if (e == GL_NO_ERROR) break;
+    if (budget > 0) {
+      budget--;
+      logInfo("glGetError 0x%04x after %s", (unsigned)e, where);
+    }
+  }
+}
+#else
 void logError(const char* msg) { __android_log_print(ANDROID_LOG_ERROR, "SmasPort", "%s", msg); }
+#endif
 
 GLuint compile(GLenum type, const std::string& src) {
   GLuint s = glCreateShader(type);
@@ -32,7 +68,7 @@ GLuint compile(GLenum type, const std::string& src) {
   return s;
 }
 
-GLuint link(const std::string& vs, const std::string& fs) {
+GLuint linkProgram(const std::string& vs, const std::string& fs) {
   GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
   if (!v || !f) return 0;
   GLuint p = glCreateProgram();
@@ -43,7 +79,7 @@ GLuint link(const std::string& vs, const std::string& fs) {
   glDeleteShader(f);
   GLint ok = 0;
   glGetProgramiv(p, GL_LINK_STATUS, &ok);
-  if (!ok) {
+  if (!ok || !glIsProgram(p)) {
     char buf[2048];
     glGetProgramInfoLog(p, sizeof(buf), nullptr, buf);
     logError(buf);
@@ -100,6 +136,7 @@ vec3 texRow(float x, float row) {
   return texLinear(vec2((tf + f) * u_texSize.z, (row + 0.5) * u_texSize.w));
 }
 
+#ifndef SMAS_LITE
 vec3 crt(vec2 uv, vec2 pos, bool aperture) {
   vec2 texel = uv * u_texSize.xy;
   float y = texel.y - 0.5, yf = floor(y), t = y - yf;
@@ -128,6 +165,7 @@ vec3 lcd(vec2 uv) {
   float g = mix(1.0, edge.x * edge.y, 0.55 * u_f0.y + 0.2);
   return c * g;
 }
+#endif
 
 vec3 applyProfile(vec3 c) {
   int prof = int(u_f2.x);
@@ -160,6 +198,7 @@ vec3 applyProfile(vec3 c) {
   return c;
 }
 
+#ifndef SMAS_LITE
 vec3 daltonize(vec3 c, int mode) {
   mat3 rgb2lms = mat3(17.8824, 43.5161, 4.11935, 3.45565, 27.1554, 3.86714, 0.0299566, 0.184309, 1.46709);
   mat3 lms2rgb = mat3(0.0809444479, -0.130504409, 0.116721066, -0.0102485335, 0.0540193266, -0.113614708,
@@ -174,6 +213,7 @@ vec3 daltonize(vec3 c, int mode) {
   vec3 corr = vec3(0.0, err.r * 0.7 + err.g, err.r * 0.7 + err.b);
   return clamp(c + corr, 0.0, 1.0);
 }
+#endif
 
 vec3 applyColor(vec3 c) {
   c = pow(max(c, 0.0), vec3(1.0 / u_f1.w));
@@ -185,13 +225,21 @@ vec3 applyColor(vec3 c) {
   float tmp = u_f3.z;
   if (tmp > 0.0) c *= mix(vec3(1.0), vec3(1.0, 0.9, 0.74), tmp);
   else if (tmp < 0.0) c *= mix(vec3(1.0), vec3(0.82, 0.92, 1.0), -tmp);
+#ifndef SMAS_LITE
   int cb = int(u_f2.y);
   if (cb > 0) c = daltonize(c, cb);
+#endif
   return clamp(c, 0.0, 1.0);
 }
 
 void main() {
   vec2 uv = v_uv;
+#ifdef SMAS_LITE
+  if (int(u_f0.w) == 1) {
+    o_col = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+#else
   if (int(u_f0.w) == 1) {
     // a blurred, darkened backdrop for the sides
     vec3 acc = vec3(0.0);
@@ -207,6 +255,7 @@ void main() {
     o_col = vec4(c * vign * u_f3.x, 1.0);
     return;
   }
+#endif
   float curve = u_f0.z;
   if (curve > 0.0) {
     vec2 cc = uv * 2.0 - 1.0;
@@ -219,12 +268,18 @@ void main() {
   }
   int filt = int(u_f0.x);
   vec3 c;
+#ifdef SMAS_LITE
+  if (filt == 0) c = texNearest(uv);
+  else if (filt == 2) c = texLinear(uv);
+  else c = texSharp(uv);
+#else
   if (filt == 0) c = texNearest(uv);
   else if (filt == 1) c = texSharp(uv);
   else if (filt == 2) c = texLinear(uv);
   else if (filt == 3) c = crt(uv, gl_FragCoord.xy, false);
   else if (filt == 4) c = crt(uv, gl_FragCoord.xy, true);
   else c = lcd(uv);
+#endif
   c = applyColor(c);
   if (curve > 0.0) {
     vec2 cc = uv * 2.0 - 1.0;
@@ -417,7 +472,7 @@ private:
 };
 
 bool GlesCanvas::create() {
-  prog_ = link(kOverlayVS, kOverlayFS);
+  prog_ = linkProgram(kOverlayVS, kOverlayFS);
   if (!prog_) return false;
   locScreen_ = glGetUniformLocation(prog_, "u_screen");
   locAtlas_ = glGetUniformLocation(prog_, "u_atlas");
@@ -493,8 +548,13 @@ void GlesCanvas::flush() {
   glUniform1i(locImage_, 1);
   glBindVertexArray(vao_);
   glBindBuffer(GL_ARRAY_BUFFER, vb_);
+#ifdef __SWITCH__
+  // (a new buffer of just the size used: the driver is not asked for 2.6 MB at every flush)
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts_.size() * sizeof(OVert)), verts_.data(), GL_STREAM_DRAW);
+#else
   glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)kMaxQuads * 4 * sizeof(OVert), nullptr, GL_STREAM_DRAW);  // orphan
   glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(verts_.size() * sizeof(OVert)), verts_.data());
+#endif
   glDrawElements(GL_TRIANGLES, (GLsizei)(verts_.size() / 4 * 6), GL_UNSIGNED_SHORT, nullptr);
   glBindVertexArray(0);
   verts_.clear();
@@ -669,7 +729,8 @@ void GlesCanvas::freeImage(int image) {
 }
 
 // ---- text ----------------------------------------------------------------------
-// Glyphs from SmasActivity.renderGlyphs (Android's own text engine): per code
+// Glyphs from SmasActivity.renderGlyphs (Android's own text engine; on the Switch
+// nxRenderGlyphs, FreeType with the system's font): per code
 // point the advance x 64, the bitmap's left and top (from the pen and the
 // baseline), its size; then the 8-bit coverage bitmaps one after another.
 bool GlesCanvas::buildFont(Font& f, float px, bool bold, bool title) {
@@ -678,6 +739,11 @@ bool GlesCanvas::buildFont(Font& f, float px, bool bold, bool title) {
   for (uint32_t c = 0xA1; c < 0x100; c++)
     if (c != 0xAD) cps.push_back(c);
   for (uint32_t c : kExtraCps) cps.push_back(c);
+#ifdef __SWITCH__
+  std::vector<int> meta;
+  std::vector<uint8_t> bits;
+  if (!nxRenderGlyphs(cps.data(), cps.size(), px, bold, title, &meta, &bits)) return false;
+#else
   JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
   jobject act = (jobject)SDL_AndroidGetActivity();
   if (!env || !act) return false;
@@ -706,6 +772,7 @@ bool GlesCanvas::buildFont(Font& f, float px, bool bold, bool title) {
   env->ExceptionClear();
   env->DeleteLocalRef(cls);
   env->DeleteLocalRef(act);
+#endif
   if (meta.empty()) return false;
   f.ascent = meta[0];
   f.lineH = meta[1];
@@ -854,10 +921,57 @@ bool Video::init(SDL_Window* window) {
   SDL_GL_MakeCurrent(window, (SDL_GLContext)gl_);
   SDL_GL_SetSwapInterval(1);
   SDL_GL_GetDrawableSize(window, &w_, &h_);
-  prog_ = link(kGameVS, kGameFS);
+#ifdef __SWITCH__
+  {
+    int ww = 0, wh = 0;
+    SDL_GetWindowSize(window, &ww, &wh);
+    const char* vendor = (const char*)glGetString(GL_VENDOR);
+    const char* renderer = (const char*)glGetString(GL_RENDERER);
+    const char* version = (const char*)glGetString(GL_VERSION);
+    const char* glsl = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
+    logInfo("GL vendor \"%s\", renderer \"%s\"", vendor ? vendor : "?", renderer ? renderer : "?");
+    logInfo("GL version \"%s\", GLSL \"%s\"", version ? version : "?", glsl ? glsl : "?");
+    logInfo("window %dx%d, drawable %dx%d", ww, wh, w_, h_);
+    if (w_ <= 0 || h_ <= 0) {
+      // (SDL gave no drawable size: the window's, else the console's own display size: 0x0 would
+      // leave the viewport empty and the screen black)
+      w_ = ww;
+      h_ = wh;
+      if (w_ <= 0 || h_ <= 0) nx::displaySize(&w_, &h_);
+      logInfo("no drawable size from SDL: using %dx%d", w_, h_);
+    }
+    checkGl("context setup");
+  }
+  const Uint32 t0 = SDL_GetTicks();
+#endif
+  liteShader_ = false;
+#ifdef SMAS_TEST_FORCE_LITE
+  prog_ = 0;  // (test builds: as if the full picture shader did not build)
+#else
+  prog_ = linkProgram(kGameVS, kGameFS);
+#endif
+  if (!prog_) {
+    // (the full picture shader did not build on this driver: the plain one, without the CRT, LCD,
+    // colour-vision and blurred-backdrop passes, still shows the game)
+    logError("the picture shader did not build: trying the plain one");
+    std::string lite = kGameFS;
+    lite.insert(lite.find('\n') + 1, "#define SMAS_LITE\n");
+    prog_ = linkProgram(kGameVS, lite);
+    liteShader_ = prog_ != 0;
+  }
+#ifdef __SWITCH__
+  logInfo("picture shader %s in %u ms%s", prog_ ? "built" : "FAILED", (unsigned)(SDL_GetTicks() - t0),
+          liteShader_ ? " (plain version)" : "");
+  checkGl("picture shader");
+#endif
   if (!prog_) return false;
   const char* names[] = {"u_texP", "u_texL", "u_texSize", "u_outSize", "u_f0", "u_f1", "u_f2", "u_f3"};
-  for (int i = 0; i < 8; i++) loc_[i] = glGetUniformLocation(prog_, names[i]);
+  for (int i = 0; i < 8; i++) {
+    loc_[i] = glGetUniformLocation(prog_, names[i]);
+#ifdef __SWITCH__
+    if (loc_[i] < 0) logInfo("picture shader: uniform %s not found", names[i]);
+#endif
+  }
   glGenVertexArrays(1, &vao_);
   glGenSamplers(2, samplers_);
   for (int i = 0; i < 2; i++) {
@@ -869,7 +983,15 @@ bool Video::init(SDL_Window* window) {
   }
   static unsigned epochs = 0;
   canvas_ = std::make_unique<GlesCanvas>(++epochs);
+#ifdef __SWITCH__
+  const Uint32 t1 = SDL_GetTicks();
+  const bool canvasOk = canvas_->create();
+  logInfo("UI shader %s in %u ms", canvasOk ? "built" : "FAILED", (unsigned)(SDL_GetTicks() - t1));
+  checkGl("UI setup");
+  if (!canvasOk) return false;
+#else
   if (!canvas_->create()) return false;
+#endif
   return true;
 }
 
@@ -920,6 +1042,7 @@ void Video::clear() {
 }
 
 void Video::pass(const VideoParams& p, int which, int x, int y, int w, int h) {
+  if (w <= 0 || h <= 0) return;  // (a negative viewport is a GL error)
   glViewport(x, h_ - (y + h), w, h);
   glUseProgram(prog_);
   glActiveTexture(GL_TEXTURE0);
@@ -967,6 +1090,15 @@ void Video::endUi() {
 
 void Video::present() {
   if (window_) SDL_GL_SwapWindow(window_);
+#ifdef __SWITCH__
+  // (the first frames reported, so the log shows whether the loop runs and the driver is content)
+  static unsigned frames = 0;
+  ++frames;
+  if (frames <= 3 || frames == 60 || frames == 600) {
+    logInfo("frame %u presented (%dx%d)", frames, w_, h_);
+    checkGl("a frame");
+  }
+#endif
 }
 
 bool Video::capture(std::vector<uint32_t>& out, int* w, int* h) {

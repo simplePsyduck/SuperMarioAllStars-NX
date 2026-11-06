@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <cmath>
 
+#ifdef __SWITCH__
+void logf(const char* fmt, ...);  // (the app's log file, smas_port.log: see app/app.cpp)
+#endif
+
 bool Audio::init(int latencyMs) {
   shutdown();
   latencyMs_ = latencyMs;
@@ -12,10 +16,17 @@ bool Audio::init(int latencyMs) {
   want.freq = 48000;
   want.format = AUDIO_S16SYS;
   want.channels = 2;
+#ifdef __SWITCH__
+  want.samples = 1024;  // (the Switch's audio driver works in bigger blocks)
+#else
   want.samples = 512;
+#endif
   dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
   if (!dev_) return false;
   rate_ = have.freq > 0 ? have.freq : 48000;
+#ifdef __SWITCH__
+  logf("audio: device %d Hz, %d channels, %d samples per block", (int)have.freq, (int)have.channels, (int)have.samples);
+#endif
   SDL_PauseAudioDevice(dev_, 0);
   return true;
 }

@@ -1,4 +1,7 @@
 // SNES system bus, timing and DMA.
+#if defined(__ARM_FEATURE_CRC32)
+#include <arm_acle.h>
+#endif
 #include "snes.h"
 #include "statefix.h"
 #include <algorithm>
@@ -678,8 +681,21 @@ uint32_t stateCrc(const uint8_t* d, size_t n) {
     init = true;
   }
   uint32_t c = ~0u;
-  for (size_t i = 0; i < n; i++) c = table[(c ^ d[i]) & 0xff] ^ (c >> 8);
+  size_t i = 0;
+#if defined(__ARM_FEATURE_CRC32)
+  // (the processor's own CRC-32 instructions: the same polynomial, eight bytes at a time; this runs over
+  // the whole ~270 KB state for every rewind snapshot)
+  for (; i + 8 <= n; i += 8) {
+    uint64_t v;
+    std::memcpy(&v, d + i, 8);
+    c = __crc32d(c, v);
+  }
+  for (; i < n; i++) c = __crc32b(c, d[i]);
   return ~c;
+#else
+  for (; i < n; i++) c = table[(c ^ d[i]) & 0xff] ^ (c >> 8);
+  return ~c;
+#endif
 }
 
 struct Writer {
@@ -720,6 +736,10 @@ struct Reader {
 
 std::vector<uint8_t> Snes::saveState() const {
   std::vector<uint8_t> out;
+  // (the size of the last state, to the byte plus a little: one allocation instead of a dozen growths;
+  // this runs 30 times a second for the rewind buffer)
+  static size_t lastSize = 0;
+  out.reserve(lastSize ? lastSize + 256 : (size_t)300000);
   Writer w{out};
   w.v(kStateMagic);
   w.v(kStateVersion);
@@ -768,6 +788,7 @@ std::vector<uint8_t> Snes::saveState() const {
   w.raw(x.data(), x.size());
   uint32_t crc = stateCrc(out.data(), out.size());
   w.v(crc);
+  lastSize = out.size();
   return out;
 }
 

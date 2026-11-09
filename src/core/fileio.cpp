@@ -45,7 +45,16 @@ bool writeFileSafely(const std::string& path, const void* data, size_t n) {
   bool ok = fwrite(data, 1, n, f) == n;
   ok = fflush(f) == 0 && ok;
   ok = fclose(f) == 0 && ok;
-  if (ok) ok = std::rename(tmp.c_str(), path.c_str()) == 0;
+  if (ok) {
+    ok = std::rename(tmp.c_str(), path.c_str()) == 0;
+#ifdef __SWITCH__
+    // (the SD card's file system will not rename over a file that is there: the old one goes first)
+    if (!ok) {
+      std::remove(path.c_str());
+      ok = std::rename(tmp.c_str(), path.c_str()) == 0;
+    }
+#endif
+  }
   if (!ok) std::remove(tmp.c_str());
   return ok;
 }

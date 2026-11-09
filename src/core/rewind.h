@@ -27,6 +27,7 @@ public:
 
   // (Exposed for tests.)
   static std::vector<uint8_t> encode(const std::vector<uint8_t>& older, const std::vector<uint8_t>& newer);
+  static std::vector<uint8_t> encodeSlow(const std::vector<uint8_t>& older, const std::vector<uint8_t>& newer);
   static bool decode(const std::vector<uint8_t>& delta, const std::vector<uint8_t>& newer,
                      std::vector<uint8_t>* older);
 

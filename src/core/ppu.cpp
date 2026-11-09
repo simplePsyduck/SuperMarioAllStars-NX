@@ -40,6 +40,27 @@ inline int floorMod(int a, int m) {
   int r = a % m;
   return r < 0 ? r + m : r;
 }
+// One byte of a bitplane spread to eight bytes, one per pixel (each 0 or 1): kSpreadRev[b] has pixel c
+// (byte c, counting from the left of the tile) = bit 7-c of b, kSpreadFwd[b] has it = bit c (a tile
+// flipped across).
+struct SpreadTables {
+  uint64_t fwd[256], rev[256];
+  SpreadTables() {
+    for (int b = 0; b < 256; b++) {
+      uint64_t f = 0, r = 0;
+      for (int c = 0; c < 8; c++) {
+        f |= (uint64_t)((b >> c) & 1) << (8 * c);
+        r |= (uint64_t)((b >> (7 - c)) & 1) << (8 * c);
+      }
+      fwd[b] = f;
+      rev[b] = r;
+    }
+  }
+};
+const SpreadTables kSpread;
+const uint64_t* const kSpreadFwd = kSpread.fwd;
+const uint64_t* const kSpreadRev = kSpread.rev;
+
 }  // namespace
 
 Ppu::Ppu() { reset(true); }
@@ -381,6 +402,105 @@ uint16_t Ppu::directColor(uint8_t idx, uint8_t pal) const {
   return r | (g << 5) | (b << 10);
 }
 
+// The common case of renderBg (no mosaic, no offset-per-tile): the line's scroll is the same for every
+// pixel, so the line is drawn a tile row at a time: the tile fetched (and the game's hook asked for it)
+// where renderBg's per-pixel version would fetch it, its eight pixels worked out once, and the pixels
+// stored in a tight loop. The pixels, and the calls to the hook, are exactly renderBg's (the
+// reference is kept below as the general path and tested against this one).
+void Ppu::renderBgFast(int l, int row, int x0, int x1) {
+  Px* out = layer_[l] + kMaxExt;
+  const Bg& b = bg_[l];
+  const int bpp = kBpp[mode_][l];
+  const int palBase = mode_ == 0 ? l * 32 : 0;
+  const int tileWords = bpp * 4;
+  const bool direct = bpp == 8 && (cgwsel_ & 1);
+  const int tileShift = b.bigTiles ? 4 : 3;
+  const int hofs = (b.hofs + bgHofsAdj[l]) & 0x3ff;
+  const int vofs = b.vofs + (sub_ ? subVofs_[l] : 0);
+  const int py = (row + 1 + vofs) & 0x3ff;
+  const int ty = py >> tileShift;
+  const bool hide = hideWideBg[l];
+  const bool fetchAll = wideFetchAll[l];
+  const int fy0 = py & 7;
+
+  uint8_t pix[8];
+  uint8_t cPal = 0, cPri = 0;
+  int x = x0;
+  while (x < x1) {
+    const bool margin = x < 0 || x >= 256;
+    if (margin && hide) {
+      out[x].pri = 0;
+      x++;
+      continue;
+    }
+    const int px = (x + hofs) & 0x3ff;
+    // (this run ends where the tile does, where the margin turns into the screen or back, or at the end)
+    int end = x + 8 - (px & 7);
+    const int boundary = x < 0 ? 0 : x < 256 ? 256 : x1;
+    if (end > boundary) end = boundary;
+    if (end > x1) end = x1;
+
+    const int tx = px >> tileShift;
+    uint16_t e;
+    const int wr = (margin || fetchAll) && hooks ? hooks->fetchWideTile(*this, l, tx, ty, x, &e) : PpuHooks::kWideVram;
+    if (wr == PpuHooks::kWideBlank) {  // (the next pixel asks again, as the per-pixel version does)
+      out[x].pri = 0;
+      x++;
+      continue;
+    }
+    if (wr == PpuHooks::kWideVram) e = mapEntry(l, tx, ty);
+    int tile = e & 0x3ff;
+    cPal = (e >> 10) & 7;
+    cPri = (e & 0x2000) ? 2 : 1;
+    const bool hf = e & 0x4000, vf = e & 0x8000;
+    if (b.bigTiles) {
+      int subx = (px >> 3) & 1, suby = (py >> 3) & 1;
+      if (hf) subx ^= 1;
+      if (vf) suby ^= 1;
+      tile += subx + suby * 16;
+    }
+    const int fy = vf ? 7 - fy0 : fy0;
+    const uint16_t adr = (b.charBase + (tile & 0x3ff) * tileWords + fy) & 0x7fff;
+    const uint16_t w0 = vram[adr];
+    const uint16_t w1 = bpp >= 4 ? vram[(adr + 8) & 0x7fff] : 0;
+    const uint16_t w2 = bpp == 8 ? vram[(adr + 16) & 0x7fff] : 0;
+    const uint16_t w3 = bpp == 8 ? vram[(adr + 24) & 0x7fff] : 0;
+    // (each plane's byte spread to one byte per pixel by table, the planes put together by shifts: pixel c
+    // is bit 7-c of the planes, or bit c when the tile is flipped across)
+    const uint64_t* T = hf ? kSpreadFwd : kSpreadRev;
+    uint64_t v = T[w0 & 0xff] | (T[w0 >> 8] << 1);
+    if (bpp >= 4) v |= (T[w1 & 0xff] << 2) | (T[w1 >> 8] << 3);
+    if (bpp == 8) v |= (T[w2 & 0xff] << 4) | (T[w2 >> 8] << 5) | (T[w3 & 0xff] << 6) | (T[w3 >> 8] << 7);
+    std::memcpy(pix, &v, 8);  // (little-endian: byte c is pixel c)
+    const uint8_t* src = pix + (px & 7);
+    const int cnt = end - x;
+    Px* o = out + x;
+    if (direct) {
+      for (int i = 0; i < cnt; i++) {
+        const uint8_t p = src[i];
+        if (!p) {
+          o[i].pri = 0;
+          continue;
+        }
+        o[i].col = directColor(p, cPal);
+        o[i].pri = cPri;
+        o[i].pal = cPal;
+      }
+    } else {
+      const uint16_t* pc = bpp == 8 ? cgram : bpp == 4 ? cgram + (cPal << 4) : cgram + palBase + (cPal << 2);
+      for (int i = 0; i < cnt; i++) {
+        const uint8_t p = src[i];
+        Px q;
+        q.col = pc[p];
+        q.pri = p ? cPri : 0;
+        q.pal = cPal;
+        o[i] = q;  // (a transparent pixel's colour and palette are never looked at)
+      }
+    }
+    x = end;
+  }
+}
+
 void Ppu::renderBg(int l, int row, int x0, int x1) {
   Px* out = layer_[l] + kMaxExt;
   const Bg& b = bg_[l];
@@ -396,6 +516,10 @@ void Ppu::renderBg(int l, int row, int x0, int x1) {
 
   bool opt = (mode_ == 2 || mode_ == 4 || mode_ == 6) && l < 2;
   int tileShift = b.bigTiles ? 4 : 3;
+  if (msize == 1 && !opt) {
+    renderBgFast(l, row, x0, x1);
+    return;
+  }
 
   // cached tile row
   int cachedKey = 0x7fffffff;
@@ -1198,68 +1322,125 @@ void Ppu::composeLine(uint32_t* fb, int x0, int x1, int eL, int eR) {
   const uint8_t* lut = colorLut_[brightness_];
   const uint8_t* colWin = winMask_[5] + kMaxExt;
 
-  for (int x = x0; x < x1; x++) {
-    int mainL = 5, subL = 5;
-    uint16_t mainC = cgram[0], subC = fixed;
-    uint8_t mainPal = 0;
-    for (int k = 0; k < n; k++) {
-      int l = list[k].layer;
-      if (!(tm_ & (1 << l))) continue;
-      const Px& p = layer_[l][x + kMaxExt];
-      if (p.pri != list[k].pri) continue;
-      if ((tmw_ & (1 << l)) && winMask_[l][x + kMaxExt]) continue;
-      mainL = l;
-      mainC = p.col;
-      mainPal = p.pal;
-      break;
+  // The layers that are on the screen (and on the subscreen) and have something drawn on this line, each
+  // with a small table from a pixel's priority to where that (layer, priority) stands in the front-to-back
+  // list (0xFF: nowhere). The top pixel is then the one with the lowest number, found without branches;
+  // a layer a window masks at this pixel counts as transparent there. (A layer with nothing drawn on the
+  // line - a sprite layer with no sprite here, an empty background - can never be the top one.)
+  struct Sel {
+    const Px* px;
+    const uint8_t* win;  // the layer's window mask when one applies to it, else null
+    uint8_t key[8];      // (position in the list << 3) | layer, by priority; 0xFF = not in the list
+  };
+  Sel mainSel[5], subSel[5];
+  int nm = 0, ns = 0;
+  const uint8_t onMask = (uint8_t)(tm_ | (useSub ? ts_ : 0));
+  for (int l = 0; l < 5; l++) {
+    if (!(onMask & (1 << l))) continue;
+    const Px* q = layer_[l] + kMaxExt;
+    uint32_t any = 0;
+    for (int x = x0; x < x1; x++) any |= q[x].pri;
+    if (!any) continue;
+    Sel s;
+    s.px = q;
+    for (int v = 0; v < 8; v++) s.key[v] = 0xFF;
+    for (int k = 0; k < n; k++)
+      if (list[k].layer == l) s.key[list[k].pri & 7] = (uint8_t)((k << 3) | l);
+    if (tm_ & (1 << l)) {
+      s.win = (tmw_ & (1 << l)) ? winMask_[l] + kMaxExt : nullptr;
+      mainSel[nm++] = s;
     }
-    if (useSub) {
-      for (int k = 0; k < n; k++) {
-        int l = list[k].layer;
-        if (!(ts_ & (1 << l))) continue;
-        const Px& p = layer_[l][x + kMaxExt];
-        if (p.pri != list[k].pri) continue;
-        if ((tsw_ & (1 << l)) && winMask_[l][x + kMaxExt]) continue;
-        subL = l;
-        subC = p.col;
-        break;
+    if (useSub && (ts_ & (1 << l))) {
+      s.win = (tsw_ & (1 << l)) ? winMask_[l] + kMaxExt : nullptr;
+      subSel[ns++] = s;
+    }
+  }
+  // (0xFF when no layer shows through at this pixel: the backdrop)
+  auto pick = [](const Sel* sel, int cnt, int x) -> unsigned {  // (x: the pixel; each Sel's pointers are already offset by kMaxExt)
+    unsigned best = 0xFF;
+    for (int j = 0; j < cnt; j++) {
+      const Sel& e = sel[j];
+      unsigned v = e.px[x].pri & 7;
+      if (e.win && e.win[x]) v = 0;
+      const unsigned k = e.key[v];
+      best = k < best ? k : best;
+    }
+    return best;
+  };
+
+  // No colour clipping and no colour math on this line (the usual): only the screen's top layer matters.
+  const bool plain = clipMode == 0 && (mathMode == 3 || (cgadsub_ & 0x3f) == 0);
+  if (plain) {
+    const uint16_t backdrop = cgram[0];
+    for (int x = x0; x < x1; x++) {
+      const int xi = x + kMaxExt;
+      const unsigned best = pick(mainSel, nm, x);
+      const int mainL = best == 0xFF ? 5 : (int)(best & 7);
+      const uint16_t mainC = best == 0xFF ? backdrop : layer_[mainL][xi].col;
+      const int r = mainC & 31, g = (mainC >> 5) & 31, b = (mainC >> 10) & 31;
+      const int dim = x < 0 ? dimLeft : x >= 256 ? dimRight : 0;
+      if (dim > 0 && mainL != 4) {  // (the margins' scenery; sprites, the HUD, as they are)
+        const int k = 256 - dim;
+        fb[xi] = (uint32_t(lut[r] * k >> 8) << 16) | (uint32_t(lut[g] * k >> 8) << 8) | (lut[b] * k >> 8);
+      } else {
+        fb[xi] = (uint32_t(lut[r]) << 16) | (uint32_t(lut[g]) << 8) | lut[b];
       }
     }
-    bool cw = colWin[x];
-    bool clip = clipMode == 3 || (clipMode == 1 && !cw) || (clipMode == 2 && cw);
-    bool mathOk = mathMode == 0 || (mathMode == 1 && cw) || (mathMode == 2 && !cw);
-    bool layerMath;
-    if (mainL == 4) layerMath = (cgadsub_ & 0x10) && mainPal >= 4;
-    else layerMath = cgadsub_ & (1 << mainL);
-
-    int r = mainC & 31, g = (mainC >> 5) & 31, b = (mainC >> 10) & 31;
-    if (clip) r = g = b = 0;
-    if (mathOk && layerMath) {
-      int sr = subC & 31, sg = (subC >> 5) & 31, sb = (subC >> 10) & 31;
-      bool half = halfFlag && !clip && !(useSub && subL == 5);
-      if (subtract) {
-        r = std::max(0, r - sr);
-        g = std::max(0, g - sg);
-        b = std::max(0, b - sb);
-        if (half) { r >>= 1; g >>= 1; b >>= 1; }
-      } else {
-        r += sr;
-        g += sg;
-        b += sb;
-        if (half) { r >>= 1; g >>= 1; b >>= 1; }
-        else {
-          r = std::min(31, r);
-          g = std::min(31, g);
-          b = std::min(31, b);
+  } else {
+    for (int x = x0; x < x1; x++) {
+      const int xi = x + kMaxExt;
+      int mainL = 5, subL = 5;
+      uint16_t mainC = cgram[0], subC = fixed;
+      uint8_t mainPal = 0;
+      const unsigned bestM = pick(mainSel, nm, x);
+      if (bestM != 0xFF) {
+        mainL = (int)(bestM & 7);
+        mainC = layer_[mainL][xi].col;
+        mainPal = layer_[mainL][xi].pal;
+      }
+      if (useSub) {
+        const unsigned bestS = pick(subSel, ns, x);
+        if (bestS != 0xFF) {
+          subL = (int)(bestS & 7);
+          subC = layer_[subL][xi].col;
         }
       }
-    }
-    int dim = x < 0 ? dimLeft : x >= 256 ? dimRight : 0;
-    if (dim > 0 && mainL != 4) {  // (the margins' scenery; sprites, the HUD, as they are)
-      int k = 256 - dim;
-      fb[x + kMaxExt] = (uint32_t(lut[r] * k >> 8) << 16) | (uint32_t(lut[g] * k >> 8) << 8) | (lut[b] * k >> 8);
-    } else {
-      fb[x + kMaxExt] = (uint32_t(lut[r]) << 16) | (uint32_t(lut[g]) << 8) | lut[b];
+      bool cw = colWin[x];
+      bool clip = clipMode == 3 || (clipMode == 1 && !cw) || (clipMode == 2 && cw);
+      bool mathOk = mathMode == 0 || (mathMode == 1 && cw) || (mathMode == 2 && !cw);
+      bool layerMath;
+      if (mainL == 4) layerMath = (cgadsub_ & 0x10) && mainPal >= 4;
+      else layerMath = cgadsub_ & (1 << mainL);
+
+      int r = mainC & 31, g = (mainC >> 5) & 31, b = (mainC >> 10) & 31;
+      if (clip) r = g = b = 0;
+      if (mathOk && layerMath) {
+        int sr = subC & 31, sg = (subC >> 5) & 31, sb = (subC >> 10) & 31;
+        bool half = halfFlag && !clip && !(useSub && subL == 5);
+        if (subtract) {
+          r = std::max(0, r - sr);
+          g = std::max(0, g - sg);
+          b = std::max(0, b - sb);
+          if (half) { r >>= 1; g >>= 1; b >>= 1; }
+        } else {
+          r += sr;
+          g += sg;
+          b += sb;
+          if (half) { r >>= 1; g >>= 1; b >>= 1; }
+          else {
+            r = std::min(31, r);
+            g = std::min(31, g);
+            b = std::min(31, b);
+          }
+        }
+      }
+      int dim = x < 0 ? dimLeft : x >= 256 ? dimRight : 0;
+      if (dim > 0 && mainL != 4) {  // (the margins' scenery; sprites, the HUD, as they are)
+        int k = 256 - dim;
+        fb[xi] = (uint32_t(lut[r] * k >> 8) << 16) | (uint32_t(lut[g] * k >> 8) << 8) | (lut[b] * k >> 8);
+      } else {
+        fb[xi] = (uint32_t(lut[r]) << 16) | (uint32_t(lut[g]) << 8) | lut[b];
+      }
     }
   }
   // clear unused area outside current extension

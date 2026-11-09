@@ -272,6 +272,7 @@ private:
   uint16_t readVramWord(uint16_t adr) const { return vram[adr & 0x7fff]; }
   uint16_t remapVramAdr(uint16_t adr) const;
   void renderBg(int l, int row, int x0, int x1);
+  void renderBgFast(int l, int row, int x0, int x1);
   void renderMode7(int l, int row, int x0, int x1);
   void renderObj(int row, int x0, int x1);
   void computeWindows(int x0, int x1);

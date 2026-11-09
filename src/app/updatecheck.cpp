@@ -1,5 +1,6 @@
 // Is there a newer release? See updatecheck.h.
 #include "app/updatecheck.h"
+#ifndef __SWITCH__  // (the Switch build has a do-nothing UpdateCheck: see updatecheck.h)
 #include <cctype>
 #include <vector>
 #include "app/sys.h"
@@ -56,3 +57,4 @@ bool UpdateCheck::isNewer(const std::string& tag, const std::string& current) {
   while (b.size() < a.size()) b.push_back(0);
   return a > b;
 }
+#endif  // __SWITCH__

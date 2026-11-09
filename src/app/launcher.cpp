@@ -507,7 +507,9 @@ void Launcher::draw(Menu& menu, int w, int h) {
     }
     ty0 += th;
   }
-#ifndef __ANDROID__
+#if defined(__SWITCH__)
+  const char* kEdition = "Switch Edition";
+#elif !defined(__ANDROID__)
   const char* kEdition = "PC Edition";
 #else
   const char* kEdition = "Android Edition";
@@ -670,6 +672,9 @@ void Launcher::draw(Menu& menu, int w, int h) {
 #ifdef _WIN32
       std::vector<std::string> lines = {"Place Super Mario All-Stars (USA).sfc", "in the game folder or a \"roms\" folder",
                                         "(CRC32 925637C7, 2048 KB; zipped is fine)."};
+#elif defined(__SWITCH__)
+      std::vector<std::string> lines = {"Put your Super Mario All-Stars (USA)", "ROM (.sfc or .smc) in the same folder",
+                                        "as this .nro on the SD card."};
 #elif !defined(__ANDROID__)
       std::vector<std::string> lines = {"Click here to choose your ROM, or put", "Super Mario All-Stars (USA).sfc in a",
                                         "\"roms\" folder beside the game."};

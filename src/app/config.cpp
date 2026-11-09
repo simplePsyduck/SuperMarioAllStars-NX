@@ -74,9 +74,16 @@ static std::string keyName(int vk) {
 }
 
 std::string bindingName(const Binding& b) {
+#ifdef __SWITCH__
+  // (the buttons are by position, so the Switch's A, the right one, is the standard layout's B)
+  static const char* padNames[16] = {"B", "A", "Y", "X", "L", "R", "Minus", "Plus",
+                                     "L-Stick Press", "R-Stick Press", "D-Pad Up", "D-Pad Down",
+                                     "D-Pad Left", "D-Pad Right", "ZL", "ZR"};
+#else
   static const char* padNames[16] = {"A", "B", "X", "Y", "LB", "RB", "View/Select", "Menu/Start",
                                      "L-Stick Press", "R-Stick Press", "D-Pad Up", "D-Pad Down",
                                      "D-Pad Left", "D-Pad Right", "LT", "RT"};
+#endif
   static const char* axisNames[6] = {"L-Stick X", "L-Stick Y", "R-Stick X", "R-Stick Y", "Axis 5", "Axis 6"};
   switch (b.type) {
     case Binding::None: return "-";
@@ -268,6 +275,9 @@ bool Config::load(const std::wstring& path) {
   geti("audio.msu_volume", msuVolume, 0, 100);
   geti("input.select_button", selectMode, 0, 1);
   getb("input.menu_confirm_right", confirmRight);
+#ifdef __SWITCH__
+  geti("switch.cpu_clock", cpuClock, 0, 3);
+#endif
   geti("interface.menu_style", menuStyle, 0, 3);
   getb("updates.check", checkUpdates);
   if (kv.count("updates.checked_on")) updateCheckedOn = kv["updates.checked_on"];
@@ -348,6 +358,10 @@ bool Config::save(const std::wstring& path) const {
   f << "check=" << checkUpdates << "\n";
   f << "checked_on=" << updateCheckedOn << "\n";
   f << "latest=" << updateLatest << "\n";
+#ifdef __SWITCH__
+  f << "[switch]\n";
+  f << "cpu_clock=" << cpuClock << "\n";
+#endif
   f << "[interface]\n";
   f << "menu_style=" << menuStyle << "\n";
   f << "[input]\n";

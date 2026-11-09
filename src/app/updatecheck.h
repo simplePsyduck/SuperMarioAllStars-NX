@@ -3,8 +3,22 @@
 // the player's sent), read in the background. Checked at most once a day
 // (App: Options > Check for Updates); the launcher shows a badge when newer.
 #pragma once
-#include <atomic>
 #include <string>
+
+#ifdef __SWITCH__
+// The Switch build has no network access and no updater: new versions come as a new .nro. The
+// same interface, doing nothing (and no <thread> in every file that includes app.h).
+class UpdateCheck {
+public:
+  static constexpr const char* kApi = "";
+  static std::string pageFor(const std::string& tag) { return tag; }
+  void start() {}
+  bool running() const { return false; }
+  bool poll(std::string*) { return false; }
+  static bool isNewer(const std::string&, const std::string&) { return false; }
+};
+#else
+#include <atomic>
 #include <thread>
 
 class UpdateCheck {
@@ -29,3 +43,4 @@ private:
   std::atomic<int> state_{0};  // 0 idle, 1 running, 2 done
   std::string tag_;
 };
+#endif  // __SWITCH__

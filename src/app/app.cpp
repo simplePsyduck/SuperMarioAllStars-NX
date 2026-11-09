@@ -1,6 +1,10 @@
 // Super Mario All-Stars port: the application, the same on every platform
 // (see app.h).
 #include "app/app.h"
+#ifdef __SWITCH__
+#include "platform/switch/nx_sys.h"
+#include "platform/switch/perf_nx.h"
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -157,6 +161,10 @@ void App::reloadForMsu() {
 // in the background; newer than this version, the launcher shows a badge
 // (and Options a "Get Version" button) that opens its page.
 void App::checkForUpdate(bool manual) {
+#ifdef __SWITCH__
+  (void)manual;  // (no network on the Switch build: a new version is a new .nro)
+  return;
+#endif
   if (test.on || test.runSeconds > 0) return;
 #ifdef _WIN32
   if (at.on) {  // (the recording mode: no network, only what an earlier check found)
@@ -662,7 +670,7 @@ void App::readPlayer(int p, uint16_t* out, double dt) {
       if (edge(kActLoadState)) loadState(stateSlot);
       if (edge(kActScreenshot)) screenshot();
     }
-#ifndef __ANDROID__
+#if !defined(__ANDROID__) && !defined(__SWITCH__)
     if (!menu.open()) {
       if (edge(kActFullscreen)) {
         cfg.displayMode = cfg.displayMode == DisplayMode::Windowed ? DisplayMode::Borderless : DisplayMode::Windowed;
@@ -941,6 +949,9 @@ std::shared_ptr<MenuPage> App::pageOptions() {
     // The player's own covers and background (none come with the game).
 #ifdef __ANDROID__
     const std::string where = "Choose each picture below (PNG or JPG).";
+#elif defined(__SWITCH__)
+    const std::string where = "Put PNG or JPG pictures in the covers folder next to the .nro on the SD card: smb1, "
+                              "lostlevels, smb2, smb3 and allstars (the single card), and background.";
 #else
     const std::string where = "Put PNG or JPG pictures in the covers folder (Open Covers Folder below): smb1, "
                               "lostlevels, smb2, smb3 and allstars (the single card), and background.";
@@ -980,11 +991,16 @@ std::shared_ptr<MenuPage> App::pageOptions() {
     pg.items.push_back(MenuItem::action("Open Covers Folder", [this]() {
       const std::wstring dir = pathJoin(exeDir, L"covers");
       makeDir(dir);
+#ifdef __SWITCH__
+      menu.notify("Covers folder: " + narrow(dir) + " - pictures are read when you switch Game Covers on", 6.0f);
+#else
       openFolder(dir);
       menu.notify("Covers folder opened - pictures are read when you switch Game Covers on", 4.0f);
+#endif
     }, "Where your covers and background go. After adding pictures, switch Game Covers (or Custom Background) "
        "off and on again to read them."));
 #endif
+#ifndef __SWITCH__
     pg.items.push_back(MenuItem::header("Updates"));
     pg.items.push_back(MenuItem::toggle(
         "Check for Updates", [this]() { return cfg.checkUpdates ? 1 : 0; },
@@ -1009,6 +1025,7 @@ std::shared_ptr<MenuPage> App::pageOptions() {
         menu.refresh();
       }, std::string("Looks up the latest release on GitHub now. This is version ") + kAppVersion + "."));
     }
+#endif
     pg.items.push_back(MenuItem::header("Gameplay"));
     pg.items.push_back(MenuItem::toggle(
         "NES Brick Bounce", [this]() { return cfg.nesBrickBounce ? 1 : 0; },
@@ -1046,6 +1063,17 @@ std::shared_ptr<MenuPage> App::pageOptions() {
     rw.enabled = [this]() { return !achLocked(); };
     rw.valueText = [this]() { return std::string(achLocked() ? "Off (achievements on)" : ""); };
     pg.items.push_back(rw);
+#ifdef __SWITCH__
+    pg.items.push_back(MenuItem::header("Performance"));
+    pg.items.push_back(MenuItem::choice(
+        "CPU Clock", {"Stock", "1224 MHz", "1581 MHz", "1785 MHz"}, [this]() { return cfg.cpuClock; },
+        [this](int v) {
+          cfg.cpuClock = v;
+          nx::setCpuClock(v);
+        },
+        "The Switch's CPU speed. Stock is the system's own (1020 MHz). A higher clock keeps heavy scenes at 60 fps "
+        "but uses more battery and runs hotter. smas_port.log records the clock actually reached."));
+#endif
     // (right under what it switches off)
     pg.items.push_back(MenuItem::header("Achievements"));
     pg.items.push_back(achievementsSwitch());
@@ -1184,6 +1212,8 @@ std::shared_ptr<MenuPage> App::pageAchievements() {
       logf("achievements exported to %s", narrow(dir).c_str());
 #ifdef __ANDROID__
       menu.notify("Exported to Android/data/com.darhkfox.allstars/files/achievements export", 6.0f);
+#elif defined(__SWITCH__)
+      menu.notify("Achievements exported to " + narrow(dir), 6.0f);
 #else
       openFolder(dir);
       menu.notify("Achievements exported: achievements.csv and icons", 4.0f);
@@ -1327,7 +1357,7 @@ std::shared_ptr<MenuPage> App::pageDisplay() {
                                           if (cfg.displayMode == DisplayMode::Windowed) applyDisplayMode();
                                         },
                                         "x", "Window height as a multiple of the original 224 lines."));
-#elif !defined(__ANDROID__)
+#elif !defined(__ANDROID__) && !defined(__SWITCH__)
     pg.items.push_back(MenuItem::choice(
         "Display Mode", {"Windowed", "Fullscreen"},
         [this]() { return cfg.displayMode == DisplayMode::Windowed ? 0 : 1; },
@@ -1583,7 +1613,12 @@ std::shared_ptr<MenuPage> App::pageAudio() {
                                           applyConfig();
                                         },
                                         "%"));
-#ifndef __ANDROID__
+#if defined(__SWITCH__)
+    pg.items.push_back(MenuItem::action("MSU-1 Folder", [this]() {
+      makeDir(msuDir);
+      menu.notify("Music packs go in " + narrow(msuDir) + " (one folder per pack)", 6.0f);
+    }, "Where music packs go on the SD card: one folder per pack."));
+#elif !defined(__ANDROID__)
     pg.items.push_back(MenuItem::action("Open MSU-1 Folder", [this]() {
       makeDir(msuDir);
       openFolder(msuDir);
@@ -1630,7 +1665,7 @@ std::shared_ptr<MenuPage> App::pageControls() {
         "and Button Bindings."));
     pg.items.push_back(MenuItem::slider("Stick Deadzone", 10, 80, 5, [this]() { return cfg.deadzone; },
                                         [this](int v) { cfg.deadzone = v; }, "%"));
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__SWITCH__)
     pg.items.push_back(MenuItem::header("Touch screen"));
     pg.items.push_back(MenuItem::choice("On-Screen Controls", {"While Touching", "Always", "Never"},
                                         [this]() { return cfg.touchMode; }, [this](int v) { cfg.touchMode = v; },
@@ -1852,9 +1887,16 @@ void App::frame(double dt, int gameFrames) {
       // pass, and drawing is most of a frame's work. The game keeps its speed
       // and its sound; the picture changes less often. Fast forward too.)
       snes->ppu.skipRender = !loading && i < runs - 1;
+#ifdef __SWITCH__
+      const auto emuT0 = std::chrono::steady_clock::now();
+#endif
       game->beforeFrame();
       snes->runFrame();
       game->afterFrame();
+#ifdef __SWITCH__
+      g_nxPerf.emuMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - emuT0).count();
+      g_nxPerf.emuFrames++;
+#endif
       if (game->coopPick >= 0) {  // (a title screen's co-op choice: the setting follows)
         cfg.coop = game->coopPick != 0;
         game->coopPick = -1;
@@ -1866,8 +1908,16 @@ void App::frame(double dt, int gameFrames) {
       if (!mute) audio.push(audioBuf.data(), audioBuf.size() / 2, Snes::kSampleRate);
       fpsFrames++;
       if (pendingSave >= 0 && !game->coopMidTurn()) saveState(pendingSave);
-      if (cfg.rewind && !achLocked() && !loading && !game->coopMidTurn() && (++rewindCount & 1) == 0)
+      if (cfg.rewind && !achLocked() && !loading && !game->coopMidTurn() && (++rewindCount & 1) == 0) {
+#ifdef __SWITCH__
+        const auto rwT0 = std::chrono::steady_clock::now();
+#endif
         rewind.push(snes->saveState());
+#ifdef __SWITCH__
+        g_nxPerf.rewindMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rwT0).count();
+        g_nxPerf.rewindPushes++;
+#endif
+      }
     }
     snes->ppu.skipRender = false;
     achFrame();

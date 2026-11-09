@@ -5,7 +5,7 @@ re-anchored HUDs, display options, cheats, level select, achievements, a sound t
 player. **It contains no game data: it runs from your own ROM**
 (`Super Mario All-Stars (USA).sfc`, CRC32 `925637C7`); no game starts without it.
 
-## Based on the Android port by [Darhkfox](https://github.com/Darhkfox/SuperMarioAllStars)
+Based on the Android port by [Darhkfox](https://github.com/Darhkfox/)
 
 ## Building
 Requirements: DevKitPro & MSYS2 (Windows)

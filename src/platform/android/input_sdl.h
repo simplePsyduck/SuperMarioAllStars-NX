@@ -10,6 +10,11 @@
 
 constexpr int kPadButtons = 48;
 
+#ifdef __SWITCH__
+// (libnx has a PadState of its own: two different types of one name in a program is an ODR violation,
+// which link-time optimisation reports and may act on)
+#define PadState SmasPadState
+#endif
 struct PadState {
   bool connected = false;
   bool xinput = false;

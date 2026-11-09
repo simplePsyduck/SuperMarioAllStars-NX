@@ -66,6 +66,7 @@ void Audio::push(const int16_t* in, size_t frames, double inputRate) {
     ratio = inputRate / rate_ * 0.995;
   }
   out_.clear();
+  out_.reserve((size_t)((double)frames * 2.0 * (rate_ / inputRate) * 1.1) + 64);  // (no growth inside the loop)
   float peak = 0;
   // Hermite interpolation across the input stream; hist_ holds the 4 most
   // recent input frames, pos_ is the fraction between hist_[1] and hist_[2].

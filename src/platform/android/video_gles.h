@@ -57,6 +57,8 @@ private:
   unsigned prog_ = 0, vao_ = 0, tex_ = 0, samplers_[2] = {};
   int texW_ = 0, texH_ = 0;
   int loc_[12] = {};
+  bool liteShader_ = false;  // (Switch: the plain picture shader is in use)
   std::unique_ptr<GlesCanvas> canvas_;
   void pass(const VideoParams& p, int pass, int x, int y, int w, int h);
+  bool initOnce(SDL_Window* window);  // (init, which tries it again on the Switch)
 };

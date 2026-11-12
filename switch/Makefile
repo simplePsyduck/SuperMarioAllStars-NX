@@ -12,7 +12,7 @@ endif
 
 APP_TITLE   := Super Mario All-Stars
 APP_AUTHOR  := Darhkfox & simplePsyduck
-APP_VERSION := 0.1.1
+APP_VERSION := 1.0
 TARGET      := SuperMarioAllStars
 BUILD       := build
 ICON        := icon.jpg
@@ -41,7 +41,7 @@ SOURCES := \
   $(SRC)/platform/android/touch.cpp \
   $(SRC)/platform/switch/app_switch.cpp $(SRC)/platform/switch/input_nx.cpp \
   $(SRC)/platform/switch/nx_sys.cpp $(SRC)/platform/switch/glyphs_nx.cpp \
-  $(SRC)/platform/switch/egl_nx.cpp
+  $(SRC)/platform/switch/egl_nx.cpp $(SRC)/platform/switch/jobqueue_nx.cpp
 
 OBJS := $(patsubst $(SRC)/%.cpp,$(BUILD)/%.o,$(SOURCES))
 
@@ -73,7 +73,7 @@ all: $(TARGET).nro
 
 $(BUILD)/%.o: $(SRC)/%.cpp
 	@mkdir -p $(dir $@)
-	@echo $(notdir $<)
+	@echo compiling $(notdir $<)
 	@$(CXX) -MMD -MP $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/$(TARGET).elf: $(OBJS)
@@ -90,6 +90,5 @@ $(TARGET).nro: $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).nacp $(ICON) $(wildcard
 
 clean:
 	@rm -rf $(BUILD) $(TARGET).nro
-	@echo clean
 
 -include $(OBJS:.o=.d)

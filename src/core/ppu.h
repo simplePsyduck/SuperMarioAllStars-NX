@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include "core/jobqueue.h"
 
 constexpr int kMaxExt = 224;                  // max extra pixels on each side
 constexpr int kLineW = 256 + 2 * kMaxExt;     // framebuffer line width
@@ -53,7 +54,22 @@ public:
 class Ppu {
 public:
   Ppu();
+  ~Ppu();
   void reset(bool hard);
+
+  // Mixing each line's layers on another thread (see composeLine): the platform sets queueFactory, the
+  // game's Ppu then calls setThreaded(true). The picture is complete once waitRender() has returned
+  // (Snes::runFrame does that at the end of every frame).
+  static JobQueueFactory queueFactory;
+  void setThreaded(bool on);
+  bool threaded() const { return queue_ != nullptr; }
+  bool queueBroken() const { return queue_ && queue_->broken; }
+  void waitRender();
+  double takeStallMs() {  // (the time the emulation spent waiting for the worker since the last call)
+    const double v = queue_ ? queue_->stallMs : 0;
+    if (queue_) queue_->stallMs = 0;
+    return v;
+  }
 
   uint8_t read(uint8_t reg, uint8_t openBus);
   void write(uint8_t reg, uint8_t val);
@@ -267,7 +283,12 @@ private:
   int16_t objSubDx_[128] = {}, objSubDy_[128] = {};
   void objMoves();
   void renderSubLine(int row, int k, int x0, int x1, int eL, int eR);
-  void composeLine(uint32_t* fb, int x0, int x1, int eL, int eR);
+  void composeLine(uint32_t* fb, int x0, int x1, int eL, int eR, bool async = false);
+  struct ComposeParams;
+  struct ComposeJob;
+  static void composeCore(const ComposeParams& p);
+  static void runCompose(void* job, void* user);
+  JobQueue* queue_ = nullptr;
 
   uint16_t readVramWord(uint16_t adr) const { return vram[adr & 0x7fff]; }
   uint16_t remapVramAdr(uint16_t adr) const;

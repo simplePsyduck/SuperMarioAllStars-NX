@@ -66,6 +66,7 @@ const uint64_t* const kSpreadRev = kSpread.rev;
 Ppu::Ppu() { reset(true); }
 
 void Ppu::reset(bool hard) {
+  waitRender();  // (the worker may still be writing the picture the memset below clears)
   if (hard) {
     std::memset(vram, 0, sizeof(vram));
     std::memset(cgram, 0, sizeof(cgram));
@@ -1000,7 +1001,8 @@ void Ppu::renderLine(int line) {
     for (int x = x0; x < x1; x++) o[x].pri = 0;
   }
   computeWindows(x0, x1);
-  composeLine(fb, x0, x1, eL, eR);
+  composeLine(fb, x0, x1, eL, eR, true);
+  if (queue_ && line >= frameHeight()) queue_->kick();  // (the last line: let the worker finish while the vertical blank runs)
   if (subs > 1) std::memcpy(layerMain_, layer_, sizeof layerMain_);
   for (int k = 1; k < subs; k++) renderSubLine(row, k, x0, x1, eL, eR);
 }
@@ -1299,28 +1301,41 @@ void Ppu::renderSubLine(int row, int k, int x0, int x1, int eL, int eR) {
 
 // The line's layers composed into its pixels (priority, windows, colour maths,
 // brightness, the margins' dimming and masks).
-void Ppu::composeLine(uint32_t* fb, int x0, int x1, int eL, int eR) {
+// What composeCore needs: a line's worth of everything composeLine used to read from the Ppu, so that it can
+// be run later, on another thread, from a copy.
+struct Ppu::ComposeParams {
+  uint32_t* fb;
   const PriEntry* list;
   int n;
-  switch (mode_) {
-    case 0: list = kMode0; n = sizeof(kMode0) / sizeof(PriEntry); break;
-    case 1:
-      if (bg3Priority_) { list = kMode1a; n = sizeof(kMode1a) / sizeof(PriEntry); }
-      else { list = kMode1b; n = sizeof(kMode1b) / sizeof(PriEntry); }
-      break;
-    case 6: list = kMode6; n = sizeof(kMode6) / sizeof(PriEntry); break;
-    case 7: list = kMode7; n = sizeof(kMode7) / sizeof(PriEntry); break;
-    default: list = kMode2; n = sizeof(kMode2) / sizeof(PriEntry); break;
-  }
+  uint16_t fixed, backdrop;
+  uint8_t cgwsel, cgadsub, tm, ts, tmw, tsw;
+  int dimLeft, dimRight, x0, x1, eL, eR;
+  bool maskWide;
+  int wideShowLo, wideShowHi;
+  const uint8_t* lut;
+  const Px* layer[5];
+  const uint8_t* win[6];
+};
+// A line handed to the worker: the parameters and the copies of the line's layers and window masks they
+// point into (only the range [x0, x1) of each is filled).
+struct Ppu::ComposeJob {
+  ComposeParams p;
+  uint8_t lutCopy[32];
+  Px layerCopy[5][kLineW];
+  uint8_t winCopy[6][kLineW];
+};
 
-  uint16_t fixed = fixedR_ | (fixedG_ << 5) | (fixedB_ << 10);
-  int clipMode = cgwsel_ >> 6;
-  int mathMode = (cgwsel_ >> 4) & 3;
-  bool useSub = cgwsel_ & 2;
-  bool subtract = cgadsub_ & 0x80;
-  bool halfFlag = cgadsub_ & 0x40;
-  const uint8_t* lut = colorLut_[brightness_];
-  const uint8_t* colWin = winMask_[5] + kMaxExt;
+void Ppu::composeCore(const ComposeParams& p) {
+  const int x0 = p.x0, x1 = p.x1, eL = p.eL, eR = p.eR;
+  uint32_t* fb = p.fb;
+  const uint16_t fixed = p.fixed;
+  const int clipMode = p.cgwsel >> 6;
+  const int mathMode = (p.cgwsel >> 4) & 3;
+  const bool useSub = p.cgwsel & 2;
+  const bool subtract = p.cgadsub & 0x80;
+  const bool halfFlag = p.cgadsub & 0x40;
+  const uint8_t* lut = p.lut;
+  const uint8_t* colWin = p.win[5] + kMaxExt;
 
   // The layers that are on the screen (and on the subscreen) and have something drawn on this line, each
   // with a small table from a pixel's priority to where that (layer, priority) stands in the front-to-back
@@ -1334,24 +1349,24 @@ void Ppu::composeLine(uint32_t* fb, int x0, int x1, int eL, int eR) {
   };
   Sel mainSel[5], subSel[5];
   int nm = 0, ns = 0;
-  const uint8_t onMask = (uint8_t)(tm_ | (useSub ? ts_ : 0));
+  const uint8_t onMask = (uint8_t)(p.tm | (useSub ? p.ts : 0));
   for (int l = 0; l < 5; l++) {
     if (!(onMask & (1 << l))) continue;
-    const Px* q = layer_[l] + kMaxExt;
+    const Px* q = p.layer[l] + kMaxExt;
     uint32_t any = 0;
     for (int x = x0; x < x1; x++) any |= q[x].pri;
     if (!any) continue;
     Sel s;
     s.px = q;
     for (int v = 0; v < 8; v++) s.key[v] = 0xFF;
-    for (int k = 0; k < n; k++)
-      if (list[k].layer == l) s.key[list[k].pri & 7] = (uint8_t)((k << 3) | l);
-    if (tm_ & (1 << l)) {
-      s.win = (tmw_ & (1 << l)) ? winMask_[l] + kMaxExt : nullptr;
+    for (int k = 0; k < p.n; k++)
+      if (p.list[k].layer == l) s.key[p.list[k].pri & 7] = (uint8_t)((k << 3) | l);
+    if (p.tm & (1 << l)) {
+      s.win = (p.tmw & (1 << l)) ? p.win[l] + kMaxExt : nullptr;
       mainSel[nm++] = s;
     }
-    if (useSub && (ts_ & (1 << l))) {
-      s.win = (tsw_ & (1 << l)) ? winMask_[l] + kMaxExt : nullptr;
+    if (useSub && (p.ts & (1 << l))) {
+      s.win = (p.tsw & (1 << l)) ? p.win[l] + kMaxExt : nullptr;
       subSel[ns++] = s;
     }
   }
@@ -1369,16 +1384,16 @@ void Ppu::composeLine(uint32_t* fb, int x0, int x1, int eL, int eR) {
   };
 
   // No colour clipping and no colour math on this line (the usual): only the screen's top layer matters.
-  const bool plain = clipMode == 0 && (mathMode == 3 || (cgadsub_ & 0x3f) == 0);
+  const bool plain = clipMode == 0 && (mathMode == 3 || (p.cgadsub & 0x3f) == 0);
   if (plain) {
-    const uint16_t backdrop = cgram[0];
+    const uint16_t backdrop = p.backdrop;
     for (int x = x0; x < x1; x++) {
       const int xi = x + kMaxExt;
       const unsigned best = pick(mainSel, nm, x);
       const int mainL = best == 0xFF ? 5 : (int)(best & 7);
-      const uint16_t mainC = best == 0xFF ? backdrop : layer_[mainL][xi].col;
+      const uint16_t mainC = best == 0xFF ? backdrop : p.layer[mainL][xi].col;
       const int r = mainC & 31, g = (mainC >> 5) & 31, b = (mainC >> 10) & 31;
-      const int dim = x < 0 ? dimLeft : x >= 256 ? dimRight : 0;
+      const int dim = x < 0 ? p.dimLeft : x >= 256 ? p.dimRight : 0;
       if (dim > 0 && mainL != 4) {  // (the margins' scenery; sprites, the HUD, as they are)
         const int k = 256 - dim;
         fb[xi] = (uint32_t(lut[r] * k >> 8) << 16) | (uint32_t(lut[g] * k >> 8) << 8) | (lut[b] * k >> 8);
@@ -1390,27 +1405,27 @@ void Ppu::composeLine(uint32_t* fb, int x0, int x1, int eL, int eR) {
     for (int x = x0; x < x1; x++) {
       const int xi = x + kMaxExt;
       int mainL = 5, subL = 5;
-      uint16_t mainC = cgram[0], subC = fixed;
+      uint16_t mainC = p.backdrop, subC = fixed;
       uint8_t mainPal = 0;
       const unsigned bestM = pick(mainSel, nm, x);
       if (bestM != 0xFF) {
         mainL = (int)(bestM & 7);
-        mainC = layer_[mainL][xi].col;
-        mainPal = layer_[mainL][xi].pal;
+        mainC = p.layer[mainL][xi].col;
+        mainPal = p.layer[mainL][xi].pal;
       }
       if (useSub) {
         const unsigned bestS = pick(subSel, ns, x);
         if (bestS != 0xFF) {
           subL = (int)(bestS & 7);
-          subC = layer_[subL][xi].col;
+          subC = p.layer[subL][xi].col;
         }
       }
       bool cw = colWin[x];
       bool clip = clipMode == 3 || (clipMode == 1 && !cw) || (clipMode == 2 && cw);
       bool mathOk = mathMode == 0 || (mathMode == 1 && cw) || (mathMode == 2 && !cw);
       bool layerMath;
-      if (mainL == 4) layerMath = (cgadsub_ & 0x10) && mainPal >= 4;
-      else layerMath = cgadsub_ & (1 << mainL);
+      if (mainL == 4) layerMath = (p.cgadsub & 0x10) && mainPal >= 4;
+      else layerMath = p.cgadsub & (1 << mainL);
 
       int r = mainC & 31, g = (mainC >> 5) & 31, b = (mainC >> 10) & 31;
       if (clip) r = g = b = 0;
@@ -1434,7 +1449,7 @@ void Ppu::composeLine(uint32_t* fb, int x0, int x1, int eL, int eR) {
           }
         }
       }
-      int dim = x < 0 ? dimLeft : x >= 256 ? dimRight : 0;
+      int dim = x < 0 ? p.dimLeft : x >= 256 ? p.dimRight : 0;
       if (dim > 0 && mainL != 4) {  // (the margins' scenery; sprites, the HUD, as they are)
         int k = 256 - dim;
         fb[xi] = (uint32_t(lut[r] * k >> 8) << 16) | (uint32_t(lut[g] * k >> 8) << 8) | (lut[b] * k >> 8);
@@ -1446,12 +1461,96 @@ void Ppu::composeLine(uint32_t* fb, int x0, int x1, int eL, int eR) {
   // clear unused area outside current extension
   for (int x = 0; x < kMaxExt - eL; x++) fb[x] = 0;
   for (int x = kMaxExt + 256 + eR; x < kLineW; x++) fb[x] = 0;
-  if (maskWide) {
+  if (p.maskWide) {
     for (int x = kMaxExt - eL; x < kMaxExt; x++) fb[x] = 0;
     for (int x = kMaxExt + 256; x < kMaxExt + 256 + eR; x++) fb[x] = 0;
   }
-  for (int x = -eL; x < std::min(0, wideShowLo); x++) fb[x + kMaxExt] = 0;
-  for (int x = std::max(256, wideShowHi); x < 256 + eR; x++) fb[x + kMaxExt] = 0;
+  for (int x = -eL; x < std::min(0, p.wideShowLo); x++) fb[x + kMaxExt] = 0;
+  for (int x = std::max(256, p.wideShowHi); x < 256 + eR; x++) fb[x + kMaxExt] = 0;
+}
+
+void Ppu::runCompose(void* job, void*) { composeCore(static_cast<ComposeJob*>(job)->p); }
+
+void Ppu::composeLine(uint32_t* fb, int x0, int x1, int eL, int eR, bool async) {
+  ComposeParams local;
+  ComposeParams* p = &local;
+  ComposeJob* job = nullptr;
+  if (async && queue_ && !queue_->broken) {
+    job = static_cast<ComposeJob*>(queue_->beginJob());
+    if (job) p = &job->p;
+  }
+  switch (mode_) {
+    case 0: p->list = kMode0; p->n = sizeof(kMode0) / sizeof(PriEntry); break;
+    case 1:
+      if (bg3Priority_) { p->list = kMode1a; p->n = sizeof(kMode1a) / sizeof(PriEntry); }
+      else { p->list = kMode1b; p->n = sizeof(kMode1b) / sizeof(PriEntry); }
+      break;
+    case 6: p->list = kMode6; p->n = sizeof(kMode6) / sizeof(PriEntry); break;
+    case 7: p->list = kMode7; p->n = sizeof(kMode7) / sizeof(PriEntry); break;
+    default: p->list = kMode2; p->n = sizeof(kMode2) / sizeof(PriEntry); break;
+  }
+  p->fb = fb;
+  p->fixed = fixedR_ | (fixedG_ << 5) | (fixedB_ << 10);
+  p->backdrop = cgram[0];
+  p->cgwsel = cgwsel_;
+  p->cgadsub = cgadsub_;
+  p->tm = tm_;
+  p->ts = ts_;
+  p->tmw = tmw_;
+  p->tsw = tsw_;
+  p->dimLeft = dimLeft;
+  p->dimRight = dimRight;
+  p->x0 = x0;
+  p->x1 = x1;
+  p->eL = eL;
+  p->eR = eR;
+  p->maskWide = maskWide;
+  p->wideShowLo = wideShowLo;
+  p->wideShowHi = wideShowHi;
+  if (!job) {
+    p->lut = colorLut_[brightness_];
+    for (int l = 0; l < 5; l++) p->layer[l] = layer_[l];
+    for (int w = 0; w < 6; w++) p->win[w] = winMask_[w];
+    composeCore(*p);
+    return;
+  }
+  // (a copy of what the line needs: the layers that are shown, the masks that apply)
+  std::memcpy(job->lutCopy, colorLut_[brightness_], 32);
+  p->lut = job->lutCopy;
+  const int span = x1 - x0;
+  const uint8_t shown = (uint8_t)(tm_ | ((cgwsel_ & 2) ? ts_ : 0));
+  const uint8_t windowed = (uint8_t)(tmw_ | tsw_);
+  for (int l = 0; l < 5; l++) {
+    p->layer[l] = job->layerCopy[l];
+    if (shown & (1 << l)) std::memcpy(job->layerCopy[l] + kMaxExt + x0, layer_[l] + kMaxExt + x0, (size_t)span * sizeof(Px));
+  }
+  for (int w = 0; w < 6; w++) {
+    p->win[w] = job->winCopy[w];
+    if (w == 5 || (windowed & (1 << w))) std::memcpy(job->winCopy[w] + kMaxExt + x0, winMask_[w] + kMaxExt + x0, (size_t)span);
+  }
+  queue_->endJob();
+}
+
+JobQueueFactory Ppu::queueFactory = nullptr;
+
+Ppu::~Ppu() { setThreaded(false); }
+
+void Ppu::setThreaded(bool on) {
+  if (!on) {
+    if (queue_) {
+      queue_->waitIdle();
+      delete queue_;
+      queue_ = nullptr;
+    }
+    return;
+  }
+  if (queue_ && !queue_->broken) return;
+  delete queue_;  // (a broken one)
+  queue_ = queueFactory ? queueFactory(sizeof(ComposeJob), 48, &Ppu::runCompose, this) : nullptr;
+}
+
+void Ppu::waitRender() {
+  if (queue_) queue_->waitIdle();
 }
 
 int Ppu::bgBpp(int l) const { return kBpp[mode_][l]; }

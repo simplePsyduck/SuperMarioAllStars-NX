@@ -215,6 +215,7 @@ void Snes::runFrame() {
     cpu.step();
   }
   syncApu();
+  ppu.waitRender();  // (the lines the worker thread is still mixing: the picture is whole after this)
 }
 
 void Snes::stepInstruction() {

@@ -14,6 +14,7 @@
 #include "app/sys.h"
 #include "app/vkeys.h"
 #include "platform/switch/egl_nx.h"
+#include "platform/switch/jobqueue_nx.h"
 #include "platform/switch/nx_sys.h"
 #include "platform/switch/perf_nx.h"
 
@@ -147,6 +148,7 @@ bool App::init() {
   if (!cfg.load(configPath)) cfg.save(configPath);
   cfg.vsync = true;
   nx::setCpuClock(cfg.cpuClock);  // (stock unless the player chose a higher clock in the Options menu)
+  Ppu::queueFactory = makeNxJobQueue;  // (the picture's layers can be mixed on a second core: see Ppu::setThreaded)
 
   if (!video.init(nullptr)) {
     g_initError = nx::glError();
@@ -299,6 +301,11 @@ void App::run() {
     }
     const Uint64 t0 = SDL_GetPerformanceCounter();
     frame(dt, frames);
+    if (snes && snes->ppu.queueBroken()) {  // (the worker did not answer in a second: go on with one thread)
+      logf("video thread: it stopped answering, the picture is mixed on the main thread from here on");
+      cfg.threadedVideo = false;
+      snes->ppu.setThreaded(false);
+    }
     const Uint64 t1 = SDL_GetPerformanceCounter();
     render();
     const Uint64 t2 = SDL_GetPerformanceCounter();
@@ -317,15 +324,18 @@ void App::run() {
       int underruns = 0, minQueued = 0;
       audio.takeStats(&underruns, &minQueued);
       nx::keepOverclock();  // (the system may have put the CPU clock back)
+      const double videoWait = snes ? snes->ppu.takeStallMs() : 0.0;
+      const bool videoThread = snes && snes->ppu.threaded();
       const NxPerf& pf = g_nxPerf;
       logf("perf %s, %.1f s: %d passes, %d over a refresh (%.1f%%), %d catch-ups; work %.1f ms avg / %.1f max "
            "(frame %.1f: emulation %.1f per game frame, rewind %.1f per snapshot; render %.1f); present wait %.1f; "
-           "sound: %d underruns, queue low %d frames; CPU %u MHz",
+           "sound: %d underruns, queue low %d frames; CPU %u MHz; video thread %s (the emulation waited %.2f ms per pass for it)",
            inLauncher ? "launcher" : "game", ms(st.since, t3) / 1000.0, st.passes, st.over,
            100.0 * st.over / std::max(1, st.passes), st.catchUps, st.workMs / std::max(1, st.passes), st.workMax,
            st.frameMs / std::max(1, st.passes), pf.emuFrames ? pf.emuMs / pf.emuFrames : 0.0,
            pf.rewindPushes ? pf.rewindMs / pf.rewindPushes : 0.0, st.renderMs / std::max(1, st.passes),
-           st.presentMs / std::max(1, st.passes), underruns, minQueued, nx::cpuClockHz() / 1000000);
+           st.presentMs / std::max(1, st.passes), underruns, minQueued, nx::cpuClockHz() / 1000000, videoThread ? "on" : "off",
+           videoWait / std::max(1, st.passes));
       g_nxPerf = NxPerf();
       st = Stats();
       st.since = SDL_GetPerformanceCounter();

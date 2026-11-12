@@ -117,6 +117,7 @@ struct Config {
   int deadzone = 35;           // percent
 #ifdef __SWITCH__
   int cpuClock = 0;            // Switch CPU clock: 0 stock, 1 1224 MHz, 2 1581 MHz, 3 1785 MHz
+  bool threadedVideo = true;   // Switch: the picture's layers are mixed on a second core
 #endif
   int touchMode = 0;           // on-screen controls (touch screens): 0 while touch is used, 1 always, 2 never
   int touchOpacity = 70;       // percent

@@ -277,6 +277,7 @@ bool Config::load(const std::wstring& path) {
   getb("input.menu_confirm_right", confirmRight);
 #ifdef __SWITCH__
   geti("switch.cpu_clock", cpuClock, 0, 3);
+  getb("switch.threaded_video", threadedVideo);
 #endif
   geti("interface.menu_style", menuStyle, 0, 3);
   getb("updates.check", checkUpdates);
@@ -361,6 +362,7 @@ bool Config::save(const std::wstring& path) const {
 #ifdef __SWITCH__
   f << "[switch]\n";
   f << "cpu_clock=" << cpuClock << "\n";
+  f << "threaded_video=" << (threadedVideo ? 1 : 0) << "\n";
 #endif
   f << "[interface]\n";
   f << "menu_style=" << menuStyle << "\n";

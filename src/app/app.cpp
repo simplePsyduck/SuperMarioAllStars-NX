@@ -96,6 +96,9 @@ bool App::loadRom() {
   romExact = exact;
   game.reset();  // (before the Snes it points at: its destructor uses it)
   snes = std::make_unique<Snes>();
+#ifdef __SWITCH__
+  snes->ppu.setThreaded(cfg.threadedVideo);  // (the picture's layers mixed on a second core)
+#endif
   // (the console's copy patched for an MSU-1 pack if one is chosen; the
   // launcher's previews run the ROM as it is)
   std::vector<uint8_t> run = data;
@@ -278,8 +281,12 @@ void App::launchGame(GameId g) {
 #endif
   if (!menuHintShown && !test.on) {
     menuHintShown = true;
+#ifdef __SWITCH__
+    menu.notify(cfg.selectMode == 0 ? "Press - (Minus) for the menu" : "Hold - (Minus) for the menu", 4.0f, true);
+#else
     menu.notify(cfg.selectMode == 0 ? "Press Select or Esc for the menu" : "Hold Select or press Esc for the menu", 4.0f,
                 true);
+#endif
   }
 }
 
@@ -330,7 +337,7 @@ void App::frameLauncher(double dt, int gameFrames) {
         break;
       case Launcher::kPatreon:
         openUrl("https://www.patreon.com/TeamRedTail");
-        menu.notify("Opened Patreon in your browser");
+//        menu.notify("Opened Patreon in your browser");
         break;
       case Launcher::kQuit:
         if (mi.back) {
@@ -492,6 +499,9 @@ void App::applyConfig() {
   menu.style = cfg.menuStyle;
   launcher.setConfirmRight(cfg.confirmRight);
   if (snes) snes->ppu.noSpriteLimit = cfg.noSpriteLimit;
+#ifdef __SWITCH__
+  if (snes) snes->ppu.setThreaded(cfg.threadedVideo);
+#endif
   if (snes) {
     snes->apu.dsp.musicGain = cfg.musicVolume * 256 / 100;
     snes->apu.dsp.sfxGain = cfg.sfxVolume * 256 / 100;
@@ -777,8 +787,13 @@ void App::updateBind(double dt) {
   if (bindAction < 0) return;
   bindTimer -= dt;
   char buf[160];
+#ifdef __SWITCH__
+  snprintf(buf, sizeof buf, "Press a controller button for \"%s\"  (no press cancels)  %d", actionName(bindAction),
+           (int)std::ceil(bindTimer));
+#else
   snprintf(buf, sizeof buf, "Press a %s for \"%s\"  (Esc to cancel, Delete to clear)  %d",
            bindPad ? "controller button" : "key", actionName(bindAction), (int)std::ceil(bindTimer));
+#endif
   menu.captureText = buf;
   bool cancel = bindTimer <= 0;
   Binding b;
@@ -909,9 +924,15 @@ std::shared_ptr<MenuPage> App::pageMain() {
 }
 
 std::string App::bindingsText(int a) const {
+#ifdef __SWITCH__
+  // (the Switch has no keyboard: only the controller's binding is shown)
+  std::string j = bindingName(cfg.pad[0][a]);
+  return !j.empty() && j != "-" ? j : "unbound";
+#else
   std::string k = bindingName(cfg.keys[0][a]), j = bindingName(cfg.pad[0][a]);
   bool hk = !k.empty() && k != "-", hj = !j.empty() && j != "-";
   return hk && hj ? k + " / " + j : hk ? k : hj ? j : "unbound";
+#endif
 }
 
 std::shared_ptr<MenuPage> App::pageOptions() {
@@ -928,7 +949,11 @@ std::shared_ptr<MenuPage> App::pageOptions() {
     pg.items.push_back(MenuItem::submenu("Audio", [this]() { menu.push(pageAudio()); },
                                          "Volume, latency and custom soundtracks (MSU-1 music packs)."));
     pg.items.push_back(MenuItem::submenu("Controls", [this]() { menu.push(pageControls()); },
+#ifdef __SWITCH__
+                                         "Controller bindings for both players."));
+#else
                                          "Keyboard and joypad bindings for both players."));
+#endif
     pg.items.push_back(MenuItem::choice(
         "Menu Style", {"Storybook", "Retro", "Themed Dark", "Classic"}, [this]() { return cfg.menuStyle; },
         [this](int v) {
@@ -1073,6 +1098,14 @@ std::shared_ptr<MenuPage> App::pageOptions() {
         },
         "The Switch's CPU speed. Stock is the system's own (1020 MHz). A higher clock keeps heavy scenes at 60 fps "
         "but uses more battery and runs hotter. smas_port.log records the clock actually reached."));
+    pg.items.push_back(MenuItem::toggle(
+        "Video Thread", [this]() { return cfg.threadedVideo ? 1 : 0; },
+        [this](int v) {
+          cfg.threadedVideo = v != 0;
+          applyConfig();
+        },
+        "Mixes each picture line's layers on a second core, taking that work off the one running the game. "
+        "Leave it on unless the picture shows glitches."));
 #endif
     // (right under what it switches off)
     pg.items.push_back(MenuItem::header("Achievements"));
@@ -1088,7 +1121,9 @@ std::shared_ptr<MenuPage> App::pageOptions() {
     hot("Load state", kActLoadState);
     hot("Fast forward (hold)", kActFastForward);
     hot("Rewind (hold)", kActRewind);
+#ifndef __SWITCH__
     hot("Fullscreen", kActFullscreen);
+#endif
     hot("Screenshot", kActScreenshot);
   };
   p->onLeave = [this]() { cfg.save(configPath); };
@@ -1288,10 +1323,10 @@ void App::achWelcome() {
 std::shared_ptr<MenuPage> App::pageCredits() {
   auto p = std::make_shared<MenuPage>();
   p->title = "Credits";
-  p->subtitle = "Super Mario All-Stars PC Port";
+  p->subtitle = "Super Mario All-Stars Nintendo Switch Port";
   p->rebuild = [this](MenuPage& pg) {
     pg.items.clear();
-    pg.items.push_back(MenuItem::separator("Find me over at"));
+    pg.items.push_back(MenuItem::separator("Original PC/Android port by Darhkfox"));
     struct Link {
       const char* site;
       const char* shown;
@@ -1303,12 +1338,32 @@ std::shared_ptr<MenuPage> App::pageCredits() {
         {"GitHub", "github.com/Darhkfox", "https://github.com/Darhkfox"},
         {"X", "x.com/ADH_Gaming", "https://x.com/ADH_Gaming"},
         {"Patreon", "patreon.com/c/TeamRedTail", "https://www.patreon.com/c/TeamRedTail"},
+
+    };
+	
+	static const Link pLinks[] = {
+        {"Twitch", "twitch.tv/simplePsyduck", "https://twitch.tv/simplePsyduck"},
+        {"GitHub", "github.com/simplePsyduck", "https://github.com/simplePsyduck"},
+        {"Discord", "simplepsyduck.com/discord", "https://simplepsyduck.com/discord"},
+
     };
     for (const Link& l : kLinks) {
       MenuItem it = MenuItem::action(l.site, [this, l]() {
         openUrl(l.url);
-        menu.notify(std::string("Opened ") + l.site + " in your browser");
-      }, "Opens it in your web browser.");
+   //     menu.notify(std::string(" ") + "  ");
+      }, " ");
+      std::string shown = l.shown;
+      it.valueText = [shown]() { return shown; };
+      pg.items.push_back(it);
+    }
+	
+	pg.items.push_back(MenuItem::separator("Nintendo Switch port by simplePsyduck"));
+
+	    for (const Link& l : pLinks) {
+      MenuItem it = MenuItem::action(l.site, [this, l]() {
+        openUrl(l.url);
+ //       menu.notify(std::string(" ") + "  ");
+      }, " ");
       std::string shown = l.shown;
       it.valueText = [shown]() { return shown; };
       pg.items.push_back(it);
@@ -1633,10 +1688,16 @@ std::shared_ptr<MenuPage> App::pageControls() {
   p->title = "Controls";
   p->rebuild = [this](MenuPage& pg) {
     pg.items.clear();
+#ifdef __SWITCH__
+    // (no keyboard on the Switch: the controller's bindings only)
+    pg.items.push_back(MenuItem::submenu("Player 1 Controller", [this]() { menu.push(pageBindings(0, true)); }));
+    pg.items.push_back(MenuItem::submenu("Player 2 Controller", [this]() { menu.push(pageBindings(1, true)); }));
+#else
     pg.items.push_back(MenuItem::submenu("Player 1 Keyboard", [this]() { menu.push(pageBindings(0, false)); }));
     pg.items.push_back(MenuItem::submenu("Player 1 Joypad", [this]() { menu.push(pageBindings(0, true)); }));
     pg.items.push_back(MenuItem::submenu("Player 2 Keyboard", [this]() { menu.push(pageBindings(1, false)); }));
     pg.items.push_back(MenuItem::submenu("Player 2 Joypad", [this]() { menu.push(pageBindings(1, true)); }));
+#endif
     std::vector<std::string> pads;
     for (int i = 0; i < 8; i++) {
       const PadState* ps = input.pad(i);
@@ -1687,12 +1748,19 @@ std::shared_ptr<MenuPage> App::pageControls() {
 
 std::shared_ptr<MenuPage> App::pageBindings(int player, bool pad) {
   auto p = std::make_shared<MenuPage>();
+#ifdef __SWITCH__
+  p->title = "Player " + std::to_string(player + 1) + " Controller";
+#else
   p->title = "Player " + std::to_string(player + 1) + (pad ? " Joypad" : " Keyboard");
+#endif
   p->subtitle = pad ? "Positional layout: the bottom face button is SNES B" : "";
   p->rebuild = [this, player, pad](MenuPage& pg) {
     pg.items.clear();
     int last = player == 0 ? kActCount : kActSelect + 1;
     for (int a = 0; a < last; a++) {
+#ifdef __SWITCH__
+      if (a == kActFullscreen) continue;  // (one full-screen layer: nothing to bind)
+#endif
       MenuItem it;
       it.kind = MenuItem::Bind;
       it.label = actionName(a);
@@ -1700,7 +1768,11 @@ std::shared_ptr<MenuPage> App::pageBindings(int player, bool pad) {
         return bindingName((pad ? cfg.pad : cfg.keys)[player][a]);
       };
       it.onActivate = [this, player, pad, a]() { startBind(player, pad, a); };
+#ifdef __SWITCH__
+      it.help = "Press A to change, then the controller button to use.";
+#else
       it.help = "Press Enter / A to change.";
+#endif
       pg.items.push_back(it);
     }
   };

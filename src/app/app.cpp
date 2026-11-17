@@ -835,9 +835,11 @@ std::shared_ptr<MenuPage> App::pageMain() {
     }, "Send the controller's Select button to the game, e.g. while paused to open the All-Stars save menu."));
 
     pg.items.push_back(MenuItem::header("Save states"));
+    std::vector<std::string> slotNames;
+    for (int i = 1; i <= kStateSlots; i++) slotNames.push_back(std::to_string(i));
     MenuItem slot = MenuItem::choice(
-        "Slot", {"1", "2", "3", "4", "5", "6", "7", "8", "9"}, [this]() { return stateSlot - 1; },
-        [this](int v) { stateSlot = v + 1; },
+        "Slot", slotNames, [this]() { return std::clamp(stateSlot, 1, kStateSlots) - 1; },
+        [this](int v) { stateSlot = std::clamp(v + 1, 1, kStateSlots); },
         "Choose the save-state slot (" + bindingsText(kActSaveState) + " saves, " + bindingsText(kActLoadState) +
             " loads in game).");
     slot.valueText = [this]() {
@@ -1088,25 +1090,8 @@ std::shared_ptr<MenuPage> App::pageOptions() {
     rw.enabled = [this]() { return !achLocked(); };
     rw.valueText = [this]() { return std::string(achLocked() ? "Off (achievements on)" : ""); };
     pg.items.push_back(rw);
-#ifdef __SWITCH__
-    pg.items.push_back(MenuItem::header("Performance"));
-    pg.items.push_back(MenuItem::choice(
-        "CPU Clock", {"Stock", "1224 MHz", "1581 MHz", "1785 MHz"}, [this]() { return cfg.cpuClock; },
-        [this](int v) {
-          cfg.cpuClock = v;
-          nx::setCpuClock(v);
-        },
-        "The Switch's CPU speed. Stock is the system's own (1020 MHz). A higher clock keeps heavy scenes at 60 fps "
-        "but uses more battery and runs hotter. smas_port.log records the clock actually reached."));
-    pg.items.push_back(MenuItem::toggle(
-        "Video Thread", [this]() { return cfg.threadedVideo ? 1 : 0; },
-        [this](int v) {
-          cfg.threadedVideo = v != 0;
-          applyConfig();
-        },
-        "Mixes each picture line's layers on a second core, taking that work off the one running the game. "
-        "Leave it on unless the picture shows glitches."));
-#endif
+    // (Switch CPU clock and video thread are not in the menu on purpose: they are set in smas_port.ini,
+    // [switch] cpu_clock (0 stock) and threaded_video (1 on), so they cannot be changed by accident)
     // (right under what it switches off)
     pg.items.push_back(MenuItem::header("Achievements"));
     pg.items.push_back(achievementsSwitch());
@@ -1504,11 +1489,15 @@ std::shared_ptr<MenuPage> App::pageGraphics() {
   p->title = "Graphics";
   p->rebuild = [this](MenuPage& pg) {
     pg.items.clear();
+    std::vector<std::string> filterNames = {"Nearest (Sharp Pixels)", "Sharp Bilinear", "Smooth (Bilinear)",
+                                            "CRT Scanlines", "CRT Aperture Grille", "LCD Grid"};
+#ifndef _WIN32  // (the pixel-art scalers are in the OpenGL ES picture shader; the Direct3D one doesn't have them yet)
+    filterNames.insert(filterNames.end(), {"Scale2x", "Scale4x", "xBR 2x", "xBR 4x"});
+#endif
     pg.items.push_back(MenuItem::choice(
-        "Filter", {"Nearest (Sharp Pixels)", "Sharp Bilinear", "Smooth (Bilinear)", "CRT Scanlines", "CRT Aperture Grille",
-                   "LCD Grid"},
+        "Filter", filterNames,
         [this]() { return cfg.filter; }, [this](int v) { cfg.filter = v; },
-        "Sharp Bilinear keeps pixels crisp without uneven sizes."));
+        "Sharp Bilinear keeps pixels crisp without uneven sizes. Scale2x/4x and xBR smooth the pixel-art stair-steps."));
 #ifdef _WIN32
     MenuItem sl = MenuItem::submenu("Slang Shader", [this]() { menu.push(pageSlang()); },
                                     "RetroArch slang shader presets (.slangp) from the 'shaders' folder next to the "

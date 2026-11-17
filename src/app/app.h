@@ -129,6 +129,7 @@ struct App {
   double fpsTimer = 0;
   int fpsFrames = 0;
   double fps = 0;
+  static constexpr int kStateSlots = 25;  // save-state slots (state1.sst .. state25.sst)
   int stateSlot = 1;
   double sramTimer = 0;
   bool sramFailed = false;  // the last save of game progress failed (reported once)

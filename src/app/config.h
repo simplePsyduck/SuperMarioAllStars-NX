@@ -22,6 +22,10 @@ enum FilterMode {
   kFilterCrtScanlines,
   kFilterCrtAperture,
   kFilterLcd,
+  kFilterScale2x,  // pixel-art scalers (OpenGL ES builds: Switch, Android, Linux)
+  kFilterScale4x,
+  kFilterXbr2x,
+  kFilterXbr4x,
   kFilterCount
 };
 

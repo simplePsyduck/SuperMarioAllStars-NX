@@ -12,7 +12,7 @@ endif
 
 APP_TITLE   := Super Mario All-Stars
 APP_AUTHOR  := Darhkfox & simplePsyduck
-APP_VERSION := 1.0
+APP_VERSION := 1.0.1
 TARGET      := SuperMarioAllStars
 BUILD       := build
 ICON        := icon.jpg

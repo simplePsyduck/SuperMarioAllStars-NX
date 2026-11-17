@@ -302,8 +302,8 @@ void App::run() {
     const Uint64 t0 = SDL_GetPerformanceCounter();
     frame(dt, frames);
     if (snes && snes->ppu.queueBroken()) {  // (the worker did not answer in a second: go on with one thread)
-      logf("video thread: it stopped answering, the picture is mixed on the main thread from here on");
-      cfg.threadedVideo = false;
+      // (only for this run: cfg.threadedVideo and so smas_port.ini stay as they are, and the next start tries the thread again)
+      logf("video thread: it stopped answering, the picture is mixed on the main thread until the program is restarted");
       snes->ppu.setThreaded(false);
     }
     const Uint64 t1 = SDL_GetPerformanceCounter();

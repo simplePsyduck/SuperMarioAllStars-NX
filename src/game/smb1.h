@@ -43,6 +43,9 @@ public:
     kCheatFire = 1 << 3,
     kCheatTime = 1 << 4,
     kCheatMoonJump = 1 << 5,
+    kCheatFireballs = 1 << 6,  // More Active Fireballs: up to 15 at once (see smb1fire.cpp)
+    kCheatFireToBig = 1 << 7,  // Fire Mario goes to large Mario when hit (see injExec)
+    kCheatCarry = 1 << 8,      // Pick Up & Carry Koopa Shells (see smb1carry.cpp; cheat ids 40 / 41, see smas.cpp)
   };
   void applyCheats(uint32_t flags);
 
@@ -82,6 +85,12 @@ public:
     inputOverride_ = 0;
   }
   bool warpPending() const { return warpPending_; }
+  // The area number ($0760) a level (0-3) of a world starts in: worlds with five areas have an intro
+  // area ahead of level 2. -1 if the world isn't known (the ROM's tables weren't found).
+  int areaOf(int world, int level) const {
+    if (world < 0 || world >= worlds_ || level < 0 || level > 3) return -1;
+    return areaCount(world) >= 5 && level >= 1 ? level + 1 : level;
+  }
   // Buttons the engine wants pressed this frame (while starting a warp).
   uint16_t inputOverride() const { return inputOverride_; }
   bool overridesInput() const { return warpPending_; }
@@ -145,6 +154,49 @@ private:
   bool cloudStream_ = false;
   uint32_t worldTbl_ = 0, areaTbl_ = 0;  // FindAreaPointer tables
   int worlds_ = 0;
+  // ---- More Active Fireballs (smb1fire.cpp): the game's two fireball slots, and up to
+  // kFbPool more kept here, each run through the game's own FireballObjCore in slot 1.
+public:
+  static constexpr int kFbPool = 13;  // (+ the game's 2: 15 at once)
+  static constexpr int kFbVars = 16;
+  int fireballsInFlight() const;      // (testing)
+  std::string fireDebug() const;      // (testing: each fireball's state, Y high, Y, page, X)
+private:
+  void fireInit(uint8_t bankLo, uint8_t bankHi);
+  bool fireExec();
+  void fireClear();
+  void fireSave(std::vector<uint8_t>& out) const;
+  void fireLoad(const uint8_t*& p, size_t& n);
+  uint32_t fbCore_ = 0, fbRet_ = 0;
+  // Fire Mario goes to large Mario when hit: ForceInjury's STA PlayerStatus, its start of the shrink
+  // (LDA #$0A), and its way out (LDX ObjectOffset; RTS); see injExec.
+  uint32_t injStore_ = 0, injShrink_ = 0, injExit_ = 0;
+  // Pick Up & Carry Koopa Shells (smb1carry.cpp): PlayerEnemyCollision's touch of enemy X ($03:DE90),
+  // its kick of a still shell ($03:DEE7), its way out (RTS, $03:DF14).
+  uint32_t carryTouch_ = 0, carryKick_ = 0, carryExit_ = 0;
+  uint16_t carryTouchBits_ = 0;  // ([Enemy_CollisionBits]: bit 0, touching the player last time; SMB1 $0481)
+  int carried_ = -1;  // the enemy slot held (-1: none)
+  void carryInit(uint8_t bankLo, uint8_t bankHi);
+  bool carryExec(uint32_t pc);
+  void carryPlace();  // (its update about to run: beside the player)
+  void carryFrame();  // (each frame: let go of it when it can't be held, throw it when run is let go)
+public:
+  int carriedShell() const { return carried_; }  // (testing)
+  std::string carryDebug() const {
+    char b[96];
+    snprintf(b, sizeof b, "touch %06X kick %06X exit %06X bits %04X", carryTouch_, carryKick_, carryExit_, carryTouchBits_);
+    return b;
+  }
+private:
+  bool injFire_ = false;
+  bool injExec(uint32_t pc);  // FireballObjCore; just after ProcFireballs' second call of it
+  struct FbBall {
+    uint8_t v[kFbVars];
+    bool live = false, done = false;
+  } fb_[kFbPool];
+  int fbCur_ = -1;                    // the pool's fireball in slot 1 now (-1: none)
+  uint8_t fbHold_[kFbVars + 1] = {};  // slot 1 as it was, and its sprite offset
+  uint32_t fbArea_ = 0xffffffff;      // the area the pool's fireballs are in
   bool warpPending_ = false;
   int warpWorld_ = 0, warpLevel_ = 0, warpTimer_ = 0;
   uint16_t inputOverride_ = 0;

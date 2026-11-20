@@ -77,3 +77,45 @@ below are SMB1's unless noted.
 * Hills (BG2, map `$0800`, 1/2 speed): 256px periodic, mirrored from the visible area.
 * Clouds (BG3 rows 4-31, map `$5800`, 1/4 speed): built from `$7F3000` in the margins.
 * HUD: BG3 rows 0-3 (scanlines 0-31), fixed scroll.
+
+## Saves and fireballs (2026-11-19)
+
+* **Game over menu** (`$03:A18D`, `$0F06` = 0 Continue / 1 Save & Continue / 2 Save & Quit):
+  `STZ $075C` (`$A1A8`), `STZ $0760` (`$A1B4`), the world to SRAM `$70:0008` and level 0 to
+  `$70:0009`, then the save `JSL $00:8F03` (for `$0F06` != 0).
+* **Save** `$00:8F03`: the file at `$70:0010 + [$70:0004]` (`$120` bytes a file, one per All-Stars
+  file, each game its own part): world, level, area, lives... written through `$00:92F6`
+  (which sums them for the checksum written last). A world past the file's: world, then level 0
+  (`$8F6E: LDA #$00`) and area 0 (`$8F73`). The file's own world or an earlier one: its own bytes
+  again (`$8F54`-`$8F66`).
+* **Load**: the menu copies the file to `$7FFB00` (`$00:A849`) and puts `$70:0008`/`$0009` (set
+  from its file panel's world/level picker, `$B0,X`/`$C0,X` - 1) in `$7FFB00`/`$01`. The game
+  takes world, level and area from `$7FFB00-02` (`$05:C95B`). The panel's picker takes a file's
+  saved level only for The Lost Levels (`$00:A333`: `(Y & 3) == 1`); Super Mario Bros.'s start at
+  level 1. The Lost Levels' own save keeps the level.
+* **Fireballs**: ProcFireball_Bubble `$03:B680` (LL `$0D:B42F`), FireballObjCore `$03:B6E6` (LL
+  `$0D:B495`), SprObjects 11 and 12. Per fireball: `$33,X` state, `$68` X speed, `$83` page,
+  `$AB` Y speed, `$C6` Y high, `$020D` direction, `$0224` X, `$0242` Y, `$040C`/`$0427`/`$0447`,
+  `$049A` box size, `$0FC8+4X` box; sprite offset `$0B56,X` (`$50`/`$54`), the burst's `$0B51,X`.
+  OAM sprites `$01-$13` are never used by the game.
+* **Saves**: after each castle (Continue / Save & Continue / Save & Quit, cursor `$0B77`, `$05:DF50`)
+  and at a game over, both `JSL $00:8F03`; The Lost Levels' through `$00:90AC`. Neither keeps the
+  power-up (`$0756`): a file starts small.
+* **Pause menu** (Start while playing, `$03:8560`: Continue / Save & Continue / Save & Quit, `$05:DE31`
+  sets it up, `$0776` paused, cursor `$0B77`, `$05:DF50` runs it): its saves are `JSL $00:8F03` too
+  (`$05:DF95`, `$05:DFA4`), level 0 as at a game over. The Lost Levels' (`$0F:DB60`) keep the level.
+* **Widescreen**: FireballObjCore's offscreen test (`AND #$FC` on `$03D2`): the low nibble is the
+  sides, the high nibble ($F0) below or above the screen. Clearing all of it for a fireball in the
+  wide view kept one that fell into a pit: its Y past the bottom, drawn wrapped at the top.
+* **ForceInjury** (SMB1 `$03:DF52`, LL `$0D:DE8A`, as the NES): `LDX $0756; BEQ KillPlayer; STA $0756`
+  (A = 0), `$07AE` = 8 (the injury timer: the blinking), sound `$1600` = 4, `JSL` GetPlayerColors, then
+  `LDA #$0A` (+`$16`) ... `STA $0F` (the shrinking), out at +`$27` (`LDX $9E; RTS`).
+* **Touching an enemy** (PlayerEnemyCollision, SMB1 `$03:DE83: LDX $9E; BCS $DE90`, LL `$0D:DDBE`): X the
+  enemy; `[Enemy_CollisionBits]` `$0481,X` bit 0 marks a touch (one still marked from the last is left
+  alone); a still shell (ID 0-3, `$29,X` & 7 >= 2, bit 7 clear) is kicked from `$03:DEE7` (LL `$0D:DE1C`):
+  smack `$1600` = 3, `$29,X` | `$80`, EnemyFacePlayer, speed `$03:DE51,Y` (`$30`/`$D0`) to `$5E,X`, the
+  points; out at `$03:DF14` (LL `$0D:DE49`). The shell's revival timer is `$07A2,X` (one step about
+  every 20 frames). Enemy slots: flag `$10,X`, ID `$1C,X`, state `$29,X`, X `$021A,X` / `$79,X`, Y
+  `$0238,X` / `$BC,X`, speeds `$5E,X` / `$A1,X`.
+* **GameEngineSubroutine `$0F`**: 8 normal play, `$0A` shrinking (ForceInjury), `$0C` the fire flower's
+  flashing (the game standing still, TimerControl `$0747` counting from `$FC` to `$C0`).

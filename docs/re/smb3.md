@@ -456,3 +456,22 @@ spawns. The background is stale (nothing re-streams it), but collision and objec
 * **Movement** (`$23:8E15`, data bank `$21`): the pad direction (`$21:8DB4`: R L D U) picks the cell next to Mario (`$21:8DFC` Y, `$21:8E04` X offsets) and a 9-tile walkable list (`$21:8DC4` across, `$21:8DD6` up and down; `$45`/`$46` are the plain paths). Mario then moves two cells. World 4 on lead through map pipes, which the lists don't show.
 * **Level select** (`$072B`): the menu cursor until Start, then the number of players. A level's return to the map copies each player's map position back from `$7E3975+` (`$20:817B`) that many times.
 
+
+## Saves and projectiles (2026-11-19)
+
+* **Save** `$00:922D` (from the map's pause menu, `$29:EE07`; Start confirms, cursor `$028E`): only
+  when the world `$0727` is at least the file's; writes the world, then `$7E1D00-$1D7F` (all the
+  clear bits) and `$38` bytes from `$1EED` into the file (`$70:0010 + [$70:0004]`, `$4C` on).
+* **Load** `$20:81B5`: lives, items; if the file's world is the one starting (`$7FFB00` =
+  `$7FFF02`), the clear bits back to `$1D00` (`$20:8204`), then `AND $8000,Y` (`$20:8225`, data
+  bank `$21`: a 64-byte mask per world, `$21:8000 + world * $40`) keeps only some locks and
+  fortresses, copied to Luigi's `$1D40` too.
+* **Projectiles**: two slots, `$1CE1,X` (1 fireball, 2 hammer, 3+ puff); `$27:B42C` runs slot 1
+  (JSR `$B436`) then falls into slot 0, back at `$27:B2B7`. Per slot: `$1CE1/3/5/7/9/B/D,X`,
+  `$0247,X`, `$05FA,X`. `$9B` the slot being run; `$C6,X` (16-bit) its sprites' offset, found
+  free each time by `$27:D728`. `$0783,X` is the random number generator, not the slot's.
+* **Suit on the map**: `$0747`/`$0748` (Mario / Luigi) is what the next level starts with; the map
+  draws `$0429` (set from it when an item is used). The save doesn't keep either: a file starts small.
+* SRAM `$70:04A0-$1FDF` is never read or written by any of the games or the menu (watched over boot,
+  the menu, all four games' play and saves). Save Level Progress keeps its power-up records at
+  `$70:0600` on.

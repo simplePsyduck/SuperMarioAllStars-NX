@@ -300,6 +300,7 @@ bool Config::load(const std::wstring& path) {
     }
   }
   if (kv.count("cheats.flags")) cheats = strtoull(kv["cheats.flags"].c_str(), nullptr, 16);
+  getb("cheats.save_level_progress", saveLevelProgress);
   return true;
 }
 
@@ -386,6 +387,7 @@ bool Config::save(const std::wstring& path) const {
   char buf[32];
   snprintf(buf, sizeof buf, "%llx", (unsigned long long)cheats);
   f << "[cheats]\nflags=" << buf << "\n";
+  f << "save_level_progress=" << saveLevelProgress << "\n";
   std::string text = f.str();
   return writeFileSafely(path, text.data(), text.size());
 }

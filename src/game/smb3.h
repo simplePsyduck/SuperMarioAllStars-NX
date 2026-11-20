@@ -66,6 +66,7 @@ public:
     kCheatRaccoon = 1 << 5,
     kCheatItems = 1 << 6,
     kCheatNoDamage = 1 << 7,
+    kCheatFireballs = 1 << 8,  // More Active Fireballs: up to 15 at once (see smb3fire.cpp; cheat id 32)
   };
   void applyCheats(uint32_t flags);
 
@@ -75,6 +76,7 @@ public:
   // Forget per-session state (pending warp, view glide, layer-speed samples):
   // state load, reset. Learned layer speeds per tileset are kept.
   void reset() {
+    fireClear();
     warpStage_ = warpTimer_ = 0;
     input_ = 0;
     viewInit_ = false;
@@ -219,6 +221,26 @@ private:
   void boxFrame();         // (the map's WORLD box in co-op: both brothers, see smb3coop.cpp)
   bool boxShown_ = false;
   bool padSwapped_ = false;
+  // ---- More Active Fireballs (smb3fire.cpp): the player's two projectile slots ($1CE1,X), and up
+  // to kFbPool more fireballs kept here, each run through the game's own projectile code in slot 1.
+public:
+  static constexpr int kFbPool = 13;  // (+ the game's 2: 15 at once)
+  static constexpr int kFbVars = 9;
+  int fireballsInFlight() const;      // (testing)
+private:
+  bool fireExec();
+  void fireClear();
+  void fireSave(std::vector<uint8_t>& out) const;
+  void fireLoad(const uint8_t*& p, size_t n);
+  struct FbBall {
+    uint8_t v[kFbVars];
+    uint8_t owner = 0;  // (co-op: 1 = Luigi's, as projOwner_)
+    bool live = false, done = false;
+  } fb_[kFbPool];
+  int fbCur_ = -1;
+  uint8_t fbHold_[kFbVars + 2] = {};  // slot 1 as it was, its owner, $9B
+  unsigned fbArea_ = ~0u;
+  bool fireCheat_ = false;
   uint8_t projOwner_[2] = {};       // the player's fireballs/hammers ($1CE1,X): 1, the second slot's
   uint8_t projBefore_[2] = {};
   uint8_t padHi_[2] = {}, padLo_[2] = {};  // each controller's bytes last frame (for newly pressed)

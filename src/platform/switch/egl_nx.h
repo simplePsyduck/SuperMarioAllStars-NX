@@ -13,8 +13,15 @@ bool glStart(int* w, int* h);
 // The context (non-null while started), for the code that only needs to know there is one.
 void* glContext();
 
-// Shows the frame drawn so far (waits for the display's refresh).
+// Shows the frame drawn so far (waits for the display's refresh while the swap interval is 1).
 void glSwap();
+
+// VSync: 1 = each swap waits for the display's refresh, 0 = swaps don't wait (the frame is shown
+// as soon as it is ready, which can tear). False if the driver refuses; the interval in effect
+// stays as it was. Does nothing if that interval is already set.
+bool glSetSwapInterval(int interval);
+// The interval in effect (1 until changed).
+int glSwapInterval();
 
 // Ends the context, the surface and the display.
 void glStop();

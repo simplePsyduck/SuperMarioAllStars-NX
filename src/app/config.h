@@ -134,6 +134,9 @@ struct Config {
   Binding pad[2][kActCount];
   // Cheats (bit flags per cheat id)
   uint64_t cheats = 0;
+  // Cheats > Save Level Progress: the games' saves also keep the levels cleared
+  // in the saved world (SMB3's map) or the level reached (SMB1 / Lost Levels); see game/progress.h
+  bool saveLevelProgress = false;
 
   void setDefaults();
   bool load(const std::wstring& path);

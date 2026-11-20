@@ -517,6 +517,7 @@ void App::applyConfig() {
     game->setNesBrickBounce(cfg.nesBrickBounce);
     game->coop = cfg.coop;
     game->setCheats(achLocked() ? 0 : cfg.cheats);  // (achievements on: no cheats)
+    game->setSaveLevelProgress(cfg.saveLevelProgress && !achLocked());
     game->playerPalette = cfg.playerPalette;
     game->luigiPalette = cfg.luigiPalette;
   }
@@ -1478,6 +1479,15 @@ std::shared_ptr<MenuPage> App::pageDisplay() {
     };
     pg.items.push_back(hfr);
 #endif
+#ifdef __SWITCH__
+    // (App::run in app_switch.cpp applies it to the swap interval on its next pass; the menu saves
+    // smas_port.ini when it closes)
+    pg.items.push_back(MenuItem::toggle("VSync", [this]() { return cfg.vsync ? 1 : 0; },
+                                        [this](int v) { cfg.vsync = v != 0; },
+                                        "On: each frame waits for the screen's refresh (smooth, no tearing). "
+                                        "Off: frames are shown as soon as they're drawn, timed to the game's own "
+                                        "60 fps (a little less input lag; can tear)."));
+#endif
     pg.items.push_back(MenuItem::toggle("Show FPS", [this]() { return cfg.showFps ? 1 : 0; },
                                         [this](int v) { cfg.showFps = v; }));
   };
@@ -1778,6 +1788,18 @@ std::shared_ptr<MenuPage> App::pageCheats() {
       pg.items.push_back(MenuItem::info("No cheats available."));
       return;
     }
+    pg.items.push_back(MenuItem::separator("All Games"));
+    pg.items.push_back(MenuItem::toggle(
+        "Save Level Progress", [this]() { return cfg.saveLevelProgress ? 1 : 0; },
+        [this](int v) {
+          cfg.saveLevelProgress = v != 0;
+          applyConfig();
+        },
+        "Your saves keep your level progress in the world. Super Mario Bros. 3: every level, fortress and "
+        "lock cleared on the map comes back when you load (saves made before turning this on included). "
+        "Super Mario Bros.: Save & Continue and Save & Quit (from the pause menu or a game over) keep the "
+        "level you're on, instead of x-1. (The Lost Levels already does.) All three also keep Mario's power-up or suit "
+        "(Super, Fire, Raccoon, Tanooki...) for when you load the file."));
     GameId last = GameId::Boot;
     for (const CheatDef& c : list) {
       if (c.game != last) {
@@ -1796,6 +1818,7 @@ std::shared_ptr<MenuPage> App::pageCheats() {
     pg.items.push_back(MenuItem::separator());
     pg.items.push_back(MenuItem::action("Disable All Cheats", [this]() {
       cfg.cheats = 0;
+      cfg.saveLevelProgress = false;
       applyConfig();
       menu.refresh();
     }));
@@ -1982,6 +2005,13 @@ void App::frame(double dt, int gameFrames) {
     }
     snes->ppu.skipRender = false;
     achFrame();
+  }
+  if (game) {  // (Save Level Progress: "saved" / "restored")
+    const std::string m = game->progress().takeMessage();
+    if (!m.empty()) {
+      logf("%s", m.c_str());
+      menu.notify(m);
+    }
   }
   sramTimer += dt;
   if (sramTimer > 5.0 && snes->sramDirty) {

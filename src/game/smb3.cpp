@@ -1377,7 +1377,8 @@ bool Smb3Engine::onExec(uint32_t pc) {
   }
   if (pc == kProjDone1 || pc == kProjDone0) {
     coopObjAfter();
-    return false;
+    // (After slot 0's run: More Active Fireballs' own, each returning here; see smb3fire.cpp.)
+    return pc == kProjDone0 && fireExec();
   }
   if (pc == kCoinCount) {
     if (!(coop_ && inPlayer_ && coopTurn_ == 1 && coinHeld_)) return false;
@@ -3255,6 +3256,7 @@ int Smb3Engine::fetchWideTile(Ppu& ppu, int layer, int tx, int ty, int screenX, 
 
 void Smb3Engine::applyCheats(uint32_t f) {
   noDamage_ = (f & kCheatNoDamage) != 0;
+  fireCheat_ = (f & kCheatFireballs) != 0;
   if (!f) return;
   uint8_t* w = snes_.wram;
   int p = w[0x0726] & 1;
@@ -3598,6 +3600,7 @@ void Smb3Engine::saveExt(std::vector<uint8_t>& out) const {
   w.v(adjSpeed_);
   spawn_.saveCols(out);
   for (bool b : heldControl_) w.v((uint8_t)b);
+  fireSave(out);  // (More Active Fireballs' own: 'F', when there are any)
   coopSave(out);
 }
 
@@ -3760,6 +3763,7 @@ bool Smb3Engine::loadExt(const uint8_t* p, size_t n, int version) {
     r.p += SpawnCatchUp::kColsSize;
     if (r.p + sizeof(heldControl_) <= r.end) {  // (a later addition)
       for (bool& b : heldControl_) b = *r.p++ != 0;
+      fireLoad(r.p, r.end - r.p);
       coopLoad(r.p, r.end - r.p);
       return true;
     }

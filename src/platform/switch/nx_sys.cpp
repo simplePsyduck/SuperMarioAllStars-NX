@@ -237,4 +237,8 @@ void showFatal(const char* message) {
   consoleExit(nullptr);
 }
 
+void sleepNs(int64_t ns) {
+  if (ns > 0) svcSleepThread(ns);
+}
+
 }  // namespace nx

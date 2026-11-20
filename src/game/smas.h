@@ -7,6 +7,7 @@
 #include <vector>
 #include "core/snes.h"
 #include "game/achievements.h"
+#include "game/progress.h"
 
 class Smb1Engine;
 class Smb2Engine;
@@ -98,6 +99,11 @@ public:
   // ---- music
   static const std::vector<TrackDef>& trackList();
 
+  // ---- Save Level Progress (Cheats; see progress.h)
+  ProgressKeeper& progress() { return progress_; }
+  // On / off (the App's Cheats > Save Level Progress; off while achievements count).
+  void setSaveLevelProgress(bool on) { progress_.enabled = on; }
+
   // ---- achievements (the checks of the running game; see achievements.h)
   AchievementTracker& achievements() { return ach_; }
 
@@ -114,6 +120,7 @@ private:
   std::vector<uint8_t> pendingExt_;
   AchievementTracker ach_;
   Snes& snes_;
+  ProgressKeeper progress_{snes_};
   GameId game_ = GameId::Boot;
   GameId lastGame_ = GameId::Boot;
   bool gameplay_ = false;
@@ -198,4 +205,5 @@ private:
   void applyPlayerPalette(Ppu& ppu);
   static bool execThunk(void* ctx, uint32_t pc);
   static void writeThunk(void* ctx, uint32_t adr, uint8_t v, uint32_t pc);
+
 };

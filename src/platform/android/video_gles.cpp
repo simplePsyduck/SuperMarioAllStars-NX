@@ -216,6 +216,87 @@ vec3 lcd(vec2 uv) {
   return c * g;
 }
 
+#ifndef SMAS_NO_SCALERS
+// ---- pixel-art scalers: Scale2x / Scale4x and an xBR-style smoother ---------------------------------
+// Each works out the colour of one pixel of the picture blown up 2x or 4x, from the source pixels around it
+// (texelFetch: no filtering). scaler() then samples that bigger picture for the screen.
+vec3 spx(ivec2 p) { return texelFetch(u_texP, clamp(p, ivec2(0), ivec2(u_texSize.xy) - ivec2(1)), 0).bgr; }
+
+// Scale2x (EPX): a corner pixel takes the colour of its two neighbours on that side when they match each other
+// and neither matches the neighbours on the far sides. sub = which quarter of the pixel (0/1 in x and y).
+vec3 epx(vec3 e, vec3 up, vec3 left, vec3 right, vec3 down, ivec2 sub) {
+  vec3 v = sub.y == 0 ? up : down, vOpp = sub.y == 0 ? down : up;
+  vec3 h = sub.x == 0 ? left : right, hOpp = sub.x == 0 ? right : left;
+  return (h == v && v != hOpp && h != vOpp) ? h : e;
+}
+vec3 scale2xPx(ivec2 p, ivec2 sub) {
+  return epx(spx(p), spx(p + ivec2(0, -1)), spx(p + ivec2(-1, 0)), spx(p + ivec2(1, 0)), spx(p + ivec2(0, 1)), sub);
+}
+vec3 s2(ivec2 q) {  // pixel q of the Scale2x picture
+  q = clamp(q, ivec2(0), ivec2(u_texSize.xy) * 2 - ivec2(1));
+  return scale2xPx(q >> 1, q & 1);
+}
+vec3 scale4xPx(ivec2 r) {  // Scale4x = Scale2x run twice
+  ivec2 q = r >> 1, sub = r & 1;
+  return epx(s2(q), s2(q + ivec2(0, -1)), s2(q + ivec2(-1, 0)), s2(q + ivec2(1, 0)), s2(q + ivec2(0, 1)), sub);
+}
+
+// How different two colours look (luma counts most).
+float cdist(vec3 a, vec3 b) {
+  vec3 d = a - b;
+  return abs(dot(d, vec3(0.299, 0.587, 0.114))) * 48.0 + abs(dot(d, vec3(-0.169, -0.331, 0.5))) * 7.0 +
+         abs(dot(d, vec3(0.5, -0.419, -0.081))) * 6.0;
+}
+// The corner of pixel p that faces dd (+-1, +-1): is an edge running between its two neighbours on that side
+// (right/left and below/above) and cutting that corner off from the diagonal pixel? Returns the colour to lean
+// towards (rgb) and how sure (a, 0..1). The edge is judged by how well the pixels along it, and the pixels on
+// each side of it, agree, compared with the competing reading (a line through p and its diagonal neighbour).
+vec4 cornerCut(ivec2 p, ivec2 dd) {
+  ivec2 ax = ivec2(dd.x, 0), ay = ivec2(0, dd.y);
+  vec3 c0 = spx(p), cx = spx(p + ax), cy = spx(p + ay), cd = spx(p + dd);
+  if (c0 == cx || c0 == cy) return vec4(0.0);
+  vec3 sideX = spx(p + ivec2(dd.x, -dd.y)), sideY = spx(p + ivec2(-dd.x, dd.y));
+  vec3 backX = spx(p - ax), backY = spx(p - ay);
+  vec3 farX = spx(p + 2 * ax), farY = spx(p + 2 * ay);
+  vec3 farDX = spx(p + dd + ax), farDY = spx(p + dd + ay);
+  float cut = cdist(c0, sideX) + cdist(c0, sideY) + cdist(cd, farX) + cdist(cd, farY) + 4.0 * cdist(cx, cy);
+  float keep = cdist(cy, backX) + cdist(cy, farDY) + cdist(cx, farDX) + cdist(cx, backY) + 4.0 * cdist(c0, cd);
+  float sure = clamp(2.0 * (1.0 - cut / max(keep, 0.0001)), 0.0, 1.0);
+  return vec4(cdist(c0, cx) <= cdist(c0, cy) ? cx : cy, sure);
+}
+// pixel `sub` (0..n-1 in x and y) of source pixel p, with the picture n times (2 or 4) as big
+vec3 xbrPx(ivec2 p, ivec2 sub, int n) {
+  int hn = n / 2;
+  ivec2 dd = ivec2(sub.x >= hn ? 1 : -1, sub.y >= hn ? 1 : -1);
+  ivec2 o = ivec2(dd.x > 0 ? sub.x - hn : hn - 1 - sub.x, dd.y > 0 ? sub.y - hn : hn - 1 - sub.y);  // 0 = nearest the middle
+  float reach = n == 2 ? 0.5 : 0.25 * float(o.x + o.y);  // how far the outer corner leans on the edge
+  if (reach <= 0.0) return spx(p);
+  vec4 cut = cornerCut(p, dd);
+  return mix(spx(p), cut.rgb, reach * cut.a);
+}
+
+vec3 scaledPx(ivec2 sp, int n, int mode) {  // pixel sp of the n-times picture
+  sp = clamp(sp, ivec2(0), ivec2(u_texSize.xy) * n - ivec2(1));
+  ivec2 p = sp / n;
+  if (mode == 1) return xbrPx(p, sp - p * n, n);
+  return n == 2 ? scale2xPx(p, sp - p * 2) : scale4xPx(sp);
+}
+// The screen's view of the n-times picture: crisp pixels, with only their edges blended (as Sharp Bilinear).
+// The 4x picture is more pixels than the screen has, so it takes the nearest one (the 4x work is already heavy).
+vec3 scaler(vec2 uv, int n, int mode) {
+  vec2 t = uv * u_texSize.xy * float(n);
+  if (n > 2) return scaledPx(ivec2(floor(t)), n, mode);
+  vec2 per = max(u_outSize.xy / (u_f2.zw * float(n)), vec2(1.0));  // screen pixels per pixel of the big picture
+  vec2 tf = floor(t), cdv = fract(t) - 0.5;
+  vec2 region = 0.5 - 0.5 / per;
+  vec2 q = tf + (cdv - clamp(cdv, -region, region)) * per;  // (+ 0.5 - 0.5: the pixel centres sit on whole numbers)
+  ivec2 b = ivec2(floor(q));
+  vec2 w = q - floor(q);
+  return mix(mix(scaledPx(b, n, mode), scaledPx(b + ivec2(1, 0), n, mode), w.x),
+             mix(scaledPx(b + ivec2(0, 1), n, mode), scaledPx(b + ivec2(1, 1), n, mode), w.x), w.y);
+}
+#endif
+
 #endif
 
 vec3 applyProfile(vec3 c) {
@@ -330,7 +411,15 @@ void main() {
   else if (filt == 2) c = texLinear(uv);
   else if (filt == 3) c = crt(uv, gl_FragCoord.xy, false);
   else if (filt == 4) c = crt(uv, gl_FragCoord.xy, true);
-  else c = lcd(uv);
+  else if (filt == 5) c = lcd(uv);
+#ifndef SMAS_NO_SCALERS
+  else if (filt == 6) c = scaler(uv, 2, 0);
+  else if (filt == 7) c = scaler(uv, 4, 0);
+  else if (filt == 8) c = scaler(uv, 2, 1);
+  else c = scaler(uv, 4, 1);
+#else
+  else c = texSharp(uv);
+#endif
 #endif
   c = applyColor(c);
   if (curve > 0.0) {
@@ -1070,6 +1159,13 @@ bool Video::initOnce(SDL_Window* window) {
 #endif
   prog_ = linkProgram(kGameVS, kGameFS);
 #ifdef __SWITCH__
+  if (!prog_) {
+    // (the new pixel-art scalers may be what the driver chokes on: the full shader without them keeps the rest)
+    logInfo("the picture shader did not build: trying it without the Scale2x/xBR filters");
+    std::string noScalers = kGameFS;
+    noScalers.insert(noScalers.find('\n') + 1, "#define SMAS_NO_SCALERS\n");
+    prog_ = linkProgram(kGameVS, noScalers);
+  }
   if (!prog_) {
     // (the full picture shader did not build on this driver: the plain one, without the CRT, LCD,
     // colour-vision and blurred-backdrop passes, still shows the game)

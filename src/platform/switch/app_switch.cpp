@@ -146,7 +146,9 @@ bool App::init() {
   }
 
   if (!cfg.load(configPath)) cfg.save(configPath);
-  cfg.vsync = true;
+  // (display.vsync in smas_port.ini is the player's: it is no longer forced on here. The loop
+  // applies it to the swap interval, and the Options > Display "VSync" switch changes it live.)
+  logf("VSync %s (smas_port.ini)", cfg.vsync ? "on" : "off");
   nx::setCpuClock(cfg.cpuClock);  // (stock unless the player chose a higher clock in the Options menu)
   Ppu::queueFactory = makeNxJobQueue;  // (the picture's layers can be mixed on a second core: see Ppu::setThreaded)
 
@@ -214,6 +216,12 @@ void App::shutdown() {
 // needs them: that pass would run over as well, and the picture would stay at 30 fps for good. The game
 // loses that frame's time instead, which is not seen; the queued sound (64 ms by default) is what says
 // whether a frame really is owed.
+//
+// VSync off (display.vsync=0, or the Options > Display switch): the swap interval is 0, so the swap no
+// longer waits and nothing would hold the loop to the game's speed. The loop then sleeps to a timer
+// instead, one pass per game frame (1/60.1 s), and the frame is shown as soon as it is drawn (lower
+// latency; the screen is still 60 Hz, so a tear line or an odd repeated frame can show). The switch
+// takes effect on the next pass.
 void App::run() {
   const Uint64 freq = SDL_GetPerformanceFrequency();
   Uint64 last = SDL_GetPerformanceCounter();
@@ -227,8 +235,27 @@ void App::run() {
   } st;
   st.since = SDL_GetPerformanceCounter();
   auto ms = [&](Uint64 a, Uint64 b) { return 1000.0 * (double)(b - a) / (double)freq; };
+  auto nowSec = [&]() { return (double)SDL_GetPerformanceCounter() / (double)freq; };
+  const double framePeriod = 1.0 / Snes::kFrameRate;
+  int appliedVsync = -1;  // (the swap interval last asked for: -1 = not yet)
   logf("main loop starts");
   while (running && nx::mainLoop()) {
+    // (VSync: the setting to the swap interval, at the start and whenever the menu changes it)
+    const int wantVsync = cfg.vsync ? 1 : 0;
+    if (wantVsync != appliedVsync) {
+      appliedVsync = wantVsync;
+      if (!nx::glSetSwapInterval(wantVsync))
+        logf("VSync %s: the driver refused the swap interval, the swap keeps interval %d", wantVsync ? "on" : "off",
+             nx::glSwapInterval());
+      pacing = Pacing();  // (the pacing mode is chosen again below)
+      last = SDL_GetPerformanceCounter();
+    }
+    const bool timerPaced = !cfg.vsync;
+    if (timerPaced && pacing.mode == kPaceTimer) {
+      // (VSync off: wait for this frame's slot; the swap won't)
+      const double wait = pacing.deadline - nowSec();
+      if (wait > 0) nx::sleepNs((int64_t)(wait * 1e9));
+    }
     // (the focus: the system may end the program while it is in the background, so the game's
     // saves and the settings are kept when it leaves)
     const bool focused = nx::inFocus();
@@ -242,6 +269,7 @@ void App::run() {
         last = SDL_GetPerformanceCounter();
         pacing.vblanks = 0;
         pacing.accum = 0;
+        pacing.deadline = nowSec();
         audio.flush();
       }
     }
@@ -259,32 +287,55 @@ void App::run() {
     const Uint64 passStart = SDL_GetPerformanceCounter();
     const double dt = (double)(passStart - last) / freq;
     last = passStart;
-    if (pacing.mode != kPaceVsync || lockedRefreshes(hz) != pacing.perFrame) {
-      pacing = Pacing();
-      pacing.mode = kPaceVsync;
-      pacing.perFrame = lockedRefreshes(hz);
-      logf("pacing: %.2f Hz display, %d refreshes per frame (0 = uneven)", hz, pacing.perFrame);
-    }
-    pacing.hz = hz;
     int frames = 0;
-    int vb = std::max(1, (int)std::lround(dt * hz));  // refreshes since the last pass
-    if (vb > 6) {  // stalled: resume without fast-forwarding
-      vb = 0;
-      pacing.vblanks = 0;
-      pacing.accum = 0;
-      frames = 1;
-    }
-    if (pacing.perFrame) {
-      pacing.vblanks += vb;
-      while (pacing.vblanks >= pacing.perFrame) {
-        pacing.vblanks -= pacing.perFrame;
-        frames++;
+    int vb = std::max(1, (int)std::lround(dt * hz));  // refreshes since the last pass (for the log with VSync off)
+    if (timerPaced) {
+      // VSync off: one game frame per 1/60.1 s slot, kept by the sleep above.
+      if (pacing.mode != kPaceTimer) {
+        pacing = Pacing();
+        pacing.mode = kPaceTimer;
+        pacing.deadline = nowSec();
+        logf("pacing: timer, %.2f fps (VSync off)", Snes::kFrameRate);
+      }
+      pacing.hz = hz;
+      const double now = nowSec();
+      if (now - pacing.deadline > 6 * framePeriod) {  // stalled: resume without fast-forwarding
+        pacing.deadline = now + framePeriod;
+        frames = 1;
+        vb = 0;
+      } else {
+        while (pacing.deadline <= now) {
+          pacing.deadline += framePeriod;
+          frames++;
+        }
+        if (frames == 0) frames = 1;  // (woke a hair early: the slot is this one)
       }
     } else {
-      pacing.accum += vb / hz;
-      while (pacing.accum >= 1.0 / Snes::kFrameRate) {
-        pacing.accum -= 1.0 / Snes::kFrameRate;
-        frames++;
+      if (pacing.mode != kPaceVsync || lockedRefreshes(hz) != pacing.perFrame) {
+        pacing = Pacing();
+        pacing.mode = kPaceVsync;
+        pacing.perFrame = lockedRefreshes(hz);
+        logf("pacing: %.2f Hz display, %d refreshes per frame (0 = uneven)", hz, pacing.perFrame);
+      }
+      pacing.hz = hz;
+      if (vb > 6) {  // stalled: resume without fast-forwarding
+        vb = 0;
+        pacing.vblanks = 0;
+        pacing.accum = 0;
+        frames = 1;
+      }
+      if (pacing.perFrame) {
+        pacing.vblanks += vb;
+        while (pacing.vblanks >= pacing.perFrame) {
+          pacing.vblanks -= pacing.perFrame;
+          frames++;
+        }
+      } else {
+        pacing.accum += vb / hz;
+        while (pacing.accum >= 1.0 / Snes::kFrameRate) {
+          pacing.accum -= 1.0 / Snes::kFrameRate;
+          frames++;
+        }
       }
     }
     if (frames > 1) {
@@ -294,6 +345,7 @@ void App::run() {
         frames = 1;
         pacing.vblanks = 0;
         pacing.accum = 0;
+        if (timerPaced) pacing.deadline = nowSec() + framePeriod;  // (drop the owed time, as with VSync)
       } else {
         frames = std::min(frames, 2);
         st.catchUps++;
@@ -327,10 +379,10 @@ void App::run() {
       const double videoWait = snes ? snes->ppu.takeStallMs() : 0.0;
       const bool videoThread = snes && snes->ppu.threaded();
       const NxPerf& pf = g_nxPerf;
-      logf("perf %s, %.1f s: %d passes, %d over a refresh (%.1f%%), %d catch-ups; work %.1f ms avg / %.1f max "
+      logf("perf %s (VSync %s), %.1f s: %d passes, %d over a refresh (%.1f%%), %d catch-ups; work %.1f ms avg / %.1f max "
            "(frame %.1f: emulation %.1f per game frame, rewind %.1f per snapshot; render %.1f); present wait %.1f; "
            "sound: %d underruns, queue low %d frames; CPU %u MHz; video thread %s (the emulation waited %.2f ms per pass for it)",
-           inLauncher ? "launcher" : "game", ms(st.since, t3) / 1000.0, st.passes, st.over,
+           inLauncher ? "launcher" : "game", cfg.vsync ? "on" : "off", ms(st.since, t3) / 1000.0, st.passes, st.over,
            100.0 * st.over / std::max(1, st.passes), st.catchUps, st.workMs / std::max(1, st.passes), st.workMax,
            st.frameMs / std::max(1, st.passes), pf.emuFrames ? pf.emuMs / pf.emuFrames : 0.0,
            pf.rewindPushes ? pf.rewindMs / pf.rewindPushes : 0.0, st.renderMs / std::max(1, st.passes),

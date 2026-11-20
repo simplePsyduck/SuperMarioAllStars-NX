@@ -133,6 +133,7 @@ Smb1Engine::Smb1Engine(Snes& snes, uint8_t bankLo, uint8_t bankHi) : snes_(snes)
     ok_ = true;
   }
   coopInit(bankLo, bankHi);
+  fireInit(bankLo, bankHi);  // (More Active Fireballs: smb1fire.cpp)
   blinkLda_ = findSig(kSigBlink, sizeof(kSigBlink) / 2, bankLo, bankHi);
   firebarLda_ = findSig(kSigFirebar, sizeof(kSigFirebar) / 2, bankLo, bankHi);
   if (uint32_t c = findSig(kSigChkPOffscr, sizeof(kSigChkPOffscr) / 2, bankLo, bankHi)) chkPOffscr_ = c + 5;
@@ -244,6 +245,8 @@ Smb1Engine::Smb1Engine(Snes& snes, uint8_t bankLo, uint8_t bankHi) : snes_(snes)
 }
 
 void Smb1Engine::reset() {
+  fireClear();
+  carried_ = -1;
   for (int& c : colWorld_) c = -100000;
   clearShadow();
   curWrites_ = 0;
@@ -305,6 +308,7 @@ void Smb1Engine::saveExt(std::vector<uint8_t>& out) const {
   put(out, boxL_);
   put(out, boxR_);
   put(out, boxFrame_);
+  fireSave(out);  // (More Active Fireballs' own: 'F', when there are any)
   coopSave(out);
 }
 
@@ -346,6 +350,7 @@ void Smb1Engine::loadExt(const uint8_t* p, size_t n, bool running) {
   } else {
     std::fill(std::begin(boxFrame_), std::end(boxFrame_), 0u);  // (older states: none)
   }
+  fireLoad(rd.p, rd.n);
   coopLoad(rd.p, rd.n);
 }
 
@@ -409,6 +414,15 @@ void Smb1Engine::markExec() {
     if (pc) snes_.markExec(pc, true);
   for (uint32_t pc : rel16Sites_) snes_.markExec(pc, true);
   if (livesSet_) snes_.markExec(livesSet_, true);
+  if (fbRet_) snes_.markExec(fbRet_, true);
+  if (injStore_) {
+    snes_.markExec(injStore_, true);
+    snes_.markExec(injShrink_, true);
+  }
+  if (carryTouch_) {
+    snes_.markExec(carryTouch_, true);
+    snes_.markExec(carryKick_, true);
+  }
   if (titleInput_) {
     snes_.markExec(titleInput_, true);
     snes_.markExec(titleInput_ + (lostLevels_ ? 0x28 : 0x2A), true);
@@ -420,6 +434,7 @@ void Smb1Engine::markExec() {
 
 void Smb1Engine::frameStart(int want, bool active, bool hudAnchor) {
   hudAnchor_ = hudAnchor;
+  carryFrame();  // (Pick Up & Carry Koopa Shells: smb1carry.cpp)
   if (coopOk_) coopFrame();  // (co-op: see smb1coop.cpp)
   ref16Writes_ = 0;  // (a game frame draws within one emulated frame)
   uint8_t operMode = ram(0x0770), task = ram(0x0772);
@@ -769,6 +784,9 @@ void Smb1Engine::checkBg2Source() {
 }
 
 bool Smb1Engine::onExec(uint32_t pc) {
+  if (pc == fbRet_ && fbRet_) return fireExec();
+  if (injStore_ && (pc == injStore_ || pc == injShrink_)) return injExec(pc);
+  if (carryTouch_ && (pc == carryTouch_ || pc == carryKick_)) return carryExec(pc);
   if ((titleInput_ && (pc == titleInput_ || pc == titleInput_ + (lostLevels_ ? 0x28u : 0x2Au))) || (livesSet_ && pc == livesSet_))
     return titleExec(pc);
   if (coopOk_ && (pc == coopCall_ || pc == coopAfter_ || pc == coopDrawEnd_ || pc == coopEnemyAt_ || pc == coopLeftHi_ ||
@@ -816,6 +834,7 @@ bool Smb1Engine::onExec(uint32_t pc) {
     return true;
   }
   if (pc == enemyCall_) {
+    if (carried_ >= 0 && (r.x & 0xff) == carried_) carryPlace();  // (a held shell: beside the player)
     std::memcpy(preFlags_, snes_.wram + 0x10, sizeof(preFlags_));
     if (!holdEnemy(r.x & 0xff)) {
       if (coopOk_) coopObjBefore(r.x & 0xff);  // (co-op: its run for the other player; see smb1coop.cpp)
@@ -1003,7 +1022,10 @@ bool Smb1Engine::onExec(uint32_t pc) {
     uint8_t v = ram(0x03d2);
     if (!(extL_ || extR_) || x > 1 || !v) return false;
     int rel = (int8_t)ram(0x0078 + kFireballObj + x) * 256 + ram(0x0219 + kFireballObj + x) - cam16_;
-    if (enemyRange_ && rel > -extL_ - 8 && rel < 256 + extR_) return loadA(0);
+    // (Only the side bits ($0F) are the 4:3 screen's; the vertical ones ($F0) still take a fireball
+    // that has fallen below the screen away. Cleared too, one fallen into a pit in the wide view was
+    // kept, its Y past the bottom drawn wrapped round at the top.)
+    if (enemyRange_ && rel > -extL_ - 8 && rel < 256 + extR_) return loadA(v & 0xf0);
     if (extL_ <= 0 || !(v & 0x0f) || rel >= 0 || rel < -extL_ - 8) return false;
     return loadA(v & 0xf0);
   }

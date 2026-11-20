@@ -28,6 +28,10 @@ add_library(main SHARED
   ${SRC}/core/fileio.cpp
   ${SRC}/core/disasm.cpp
   ${SRC}/game/smas.cpp
+  ${SRC}/game/progress.cpp
+  ${SRC}/game/smb1fire.cpp
+  ${SRC}/game/smb1carry.cpp
+  ${SRC}/game/smb3fire.cpp
   ${SRC}/game/smb1.cpp
   ${SRC}/game/smb1coop.cpp
   ${SRC}/game/smb2.cpp

@@ -22,6 +22,7 @@ EGLSurface g_surface = EGL_NO_SURFACE;
 std::string g_error;
 int g_swapFailures = 0;
 bool g_firstSwap = true;
+int g_swapInterval = 1;  // (what eglSwapInterval last accepted)
 
 // The size the picture is drawn at: the layer's own 1280x720 (docked, the system scales it up).
 constexpr int kWidth = 1280, kHeight = 720;
@@ -126,6 +127,7 @@ bool glStart(int* w, int* h) {
   if (g_surface == EGL_NO_SURFACE) return fail("could not create the window surface");
   if (!eglMakeCurrent(g_display, g_surface, g_surface, g_context)) return fail("eglMakeCurrent failed");
   if (!eglSwapInterval(g_display, 1)) logf("EGL: eglSwapInterval(1) was refused (error 0x%04x)", (unsigned)eglGetError());
+  g_swapInterval = 1;  // (the app sets the player's choice, VSync off included, once the loop starts)
 
   EGLint sw = 0, sh = 0;
   eglQuerySurface(g_display, g_surface, EGL_WIDTH, &sw);
@@ -143,6 +145,21 @@ bool glStart(int* w, int* h) {
 }
 
 void* glContext() { return g_context == EGL_NO_CONTEXT ? nullptr : (void*)g_context; }
+
+bool glSetSwapInterval(int interval) {
+  interval = interval ? 1 : 0;
+  if (interval == g_swapInterval) return true;
+  if (g_display == EGL_NO_DISPLAY || g_surface == EGL_NO_SURFACE) return false;
+  if (!eglSwapInterval(g_display, interval)) {
+    logf("EGL: eglSwapInterval(%d) was refused (error 0x%04x)", interval, (unsigned)eglGetError());
+    return false;
+  }
+  g_swapInterval = interval;
+  logf("EGL: swap interval %d (VSync %s)", interval, interval ? "on" : "off");
+  return true;
+}
+
+int glSwapInterval() { return g_swapInterval; }
 
 void glSwap() {
   if (g_display == EGL_NO_DISPLAY || g_surface == EGL_NO_SURFACE) return;

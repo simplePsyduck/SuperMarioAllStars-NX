@@ -61,6 +61,10 @@ void keepOverclock();
 // 3 = 1785 MHz. Off (stock) is the default; the Options menu cycles it.
 void setCpuClock(int step);
 
+// Sleeps this thread for about this many nanoseconds (svcSleepThread: finer than SDL_Delay's
+// milliseconds; the frame pacing uses it with VSync off). Nothing for 0 or less.
+void sleepNs(int64_t ns);
+
 // Shows a message on the console screen and waits for + (SDL must be shut
 // down first); for errors the player has to be told about.
 void showFatal(const char* message);

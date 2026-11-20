@@ -31,6 +31,7 @@ void SmasGame::install() {
   smbll_->markExec();
   smb2_->markExec();
   smb3_->markExec();
+  ProgressKeeper::markExec(snes_);  // (Save Level Progress: see progress.h)
   snes_.setExecHook(execThunk, this);
   snes_.stateExt = this;
   snes_.clearWriteHooks();
@@ -96,7 +97,13 @@ void SmasGame::beforeFrame() {
   if (smb3_) smb3_->setCoop(coop && game_ == GameId::SMB3);
   // (co-op: the CPU at twice its speed, so the second player's turn doesn't
   // slow busy scenes down; one player keeps the console's own timing)
-  snes_.setCpuFast(coop && (game_ == GameId::SMB1 || game_ == GameId::SMBLL || game_ == GameId::SMB3));
+  // (More Active Fireballs too: each extra fireball runs the game's fireball code again in the frame;
+  // the emulated CPU at twice its speed keeps a busy frame within its time)
+  const bool manyFireballs = (game_ == GameId::SMB1 && (cheats_ >> 6) & 1) ||
+                             (game_ == GameId::SMBLL && (cheats_ >> 14) & 1) ||
+                             (game_ == GameId::SMB3 && (cheats_ >> 32) & 1);
+  snes_.setCpuFast((coop && (game_ == GameId::SMB1 || game_ == GameId::SMBLL || game_ == GameId::SMB3)) ||
+                   manyFireballs);
   if (Smb1Engine* e = engine()) {
     e->frameStart(reqExt_, enemyRange, hudAnchor);
     extL_ = e->extL();
@@ -245,6 +252,7 @@ void SmasGame::afterFrame() {
     coop = pick != 0;
     coopPick = pick;
   }
+  progress_.frame((int)game_);  // (Save Level Progress: the level being played)
   if (Smb1Engine* e = engine()) ach_.setCoop(e->coopLuigiLive(), e->coopLuigiPoles(), e->coopP2Hurts());
   else ach_.setCoop(false, 0, 0);
   ach_.frame(snes_.wram, game_);
@@ -425,6 +433,7 @@ void SmasGame::applyPlayerPalette(Ppu& ppu) {
 }
 
 void SmasGame::onStateLoaded() {
+  progress_.forget();
   detectGame();
   lastGame_ = game_;
   cancelWarps();
@@ -550,6 +559,7 @@ bool SmasGame::coopMidTurn() const {
 
 bool SmasGame::execThunk(void* ctx, uint32_t pc) {
   SmasGame* g = (SmasGame*)ctx;
+  if (g->progress_.onExec(pc, (int)g->game_, g->game_ == GameId::SMB1 ? g->smb1_.get() : nullptr)) return true;
   if (Smb1Engine* e = g->engine()) return e->onExec(pc);
   if (g->game_ == GameId::SMB3) return g->smb3_->onExec(pc);
   if (g->game_ == GameId::SMB2) return g->smb2_->onExec(pc);
@@ -562,7 +572,7 @@ void SmasGame::writeThunk(void* ctx, uint32_t adr, uint8_t v, uint32_t pc) {
   else if (g->game_ == GameId::SMB3) g->smb3_->onWrite(adr, v);
 }
 
-// Cheat ids: bits 0-7 SMB1, 8-15 Lost Levels, 16-23 SMB2, 24-31 SMB3.
+// Cheat ids: bits 0-7 SMB1, 8-15 Lost Levels, 16-23 SMB2, 24-31 and 32-39 SMB3, 40 SMB1, 41 Lost Levels.
 const std::vector<CheatDef>& SmasGame::cheatList() {
   static const std::vector<CheatDef> list = [] {
     std::vector<CheatDef> l;
@@ -575,6 +585,9 @@ const std::vector<CheatDef>& SmasGame::cheatList() {
       l.push_back({b + 3, id, "Always Fire Mario", "Keep the fire flower power-up at all times."});
       l.push_back({b + 4, id, "Infinite Time", "The level timer stays at 400."});
       l.push_back({b + 5, id, "Moon Jump", "Hold the jump button to float slowly back down."});
+      l.push_back({b + 6, id, "More Active Fireballs", "Fire Mario can have up to 15 fireballs on screen at once instead of 2."});
+      l.push_back({b + 7, id, "Fire Mario Goes to Large Mario When Hit", "Taking a hit as Fire Mario turns you into large Mario instead of small Mario."});
+      l.push_back({40 + g, id, "Pick & Carry Up Koopa Shells", "Hold the run button (Y) and touch a still Koopa or Buzzy Beetle shell to pick it up, as in Super Mario Bros. 3; let go of run to throw it."});
     }
     GameId s2 = GameId::SMB2;
     l.push_back({16, s2, "Infinite Lives", "Extra lives never drop below 9."});
@@ -592,6 +605,7 @@ const std::vector<CheatDef>& SmasGame::cheatList() {
     l.push_back({29, s3, "Always Raccoon", "Enter every level with at least the raccoon suit."});
     l.push_back({30, s3, "Stocked Item Box", "Empty item slots on the world map are refilled with power-ups."});
     l.push_back({31, s3, "Invincibility", "Enemies cannot hurt you, without the star's music or touch (pits and lava still can)."});
+    l.push_back({32, s3, "More Active Fireballs", "Fire Mario can have up to 15 fireballs on screen at once instead of 2."});
     return l;
   }();
   return list;
@@ -600,11 +614,14 @@ const std::vector<CheatDef>& SmasGame::cheatList() {
 void SmasGame::applyCheats() {
   if (Smb1Engine* e = engine()) {
     int shift = game_ == GameId::SMB1 ? 0 : 8;
-    e->applyCheats((uint32_t)((cheats_ >> shift) & 0xff));
+    // (ids 0-7 / 8-15, and past them: 40 / 41 Pick Up & Carry Koopa Shells, the engine's bit 8)
+    const int carry = game_ == GameId::SMB1 ? 40 : 41;
+    e->applyCheats((uint32_t)((cheats_ >> shift) & 0xff) | (uint32_t)((cheats_ >> carry) & 1) << 8);
   } else if (game_ == GameId::SMB2) {
     smb2_->applyCheats((uint32_t)((cheats_ >> 16) & 0xff));
   } else if (game_ == GameId::SMB3) {
-    smb3_->applyCheats((uint32_t)((cheats_ >> 24) & 0xff));
+    // (ids 24-31, and 32 on: More Active Fireballs, past the first eight)
+    smb3_->applyCheats((uint32_t)((cheats_ >> 24) & 0xff) | (uint32_t)((cheats_ >> 32) & 0xff) << 8);
   }
 }
 

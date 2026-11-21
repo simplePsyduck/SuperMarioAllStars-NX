@@ -198,23 +198,11 @@ void SmasGame::beforeFrame() {
   // A picture wiped in over another (the warp card to the character select:
   // BG mode 2's offset-per-tile, the offsets in BG3's map, every column $100
   // for the card (it is in the map's other half), turned to 0 a column at a
-  // time): half one and half the other, the margins carried on stripes of
-  // both. Black margins while it runs (columns offset differently, and a
-  // couple of frames after).
+  // time): half one and half the other. The margins stay as the old
+  // picture had them while it runs (and a couple of frames after: see
+  // beginLine).
   if (game_ == GameId::SMB2 && (picture_ || select_)) {
-    const Ppu& p = snes_.ppu;
-    bool slid = false;
-    if (p.bgMode() == 2)
-      for (int r = 0; r < 2 && !slid; r++) {
-        // (the offset BG1 gets, modulo its 512 px map: after a death the
-        // select's right half keeps $200, the same picture)
-        auto at = [&](int c) {
-          uint16_t e = p.tileEntry(2, (p.bgHofs(2) >> 3) + c, (p.bgVofs(2) >> 3) + r);
-          return (e & 0x2000) ? (e & 0x1ff) : -1;
-        };
-        for (int c = 1; c < 31 && !slid; c++) slid = at(c) != at(0);  // (31 offsets none shown: the card's 0)
-      }
-    if (slid) wipeFrames_ = 3;
+    if (wipeSliding()) wipeFrames_ = 3;
     else if (wipeFrames_ > 0) wipeFrames_--;
   } else {
     wipeFrames_ = 0;
@@ -916,7 +904,27 @@ const std::vector<TrackDef>& SmasGame::trackList() {
   return list;
 }
 
+// (SMB2's wipe: BG1's offsets in BG3's map differ from column to column)
+bool SmasGame::wipeSliding() const {
+  const Ppu& p = snes_.ppu;
+  bool slid = false;
+  if (p.bgMode() == 2)
+    for (int r = 0; r < 2 && !slid; r++) {
+      // (the offset BG1 gets, modulo its 512 px map: after a death the
+      // select's right half keeps $200, the same picture)
+      auto at = [&](int c) {
+        uint16_t e = p.tileEntry(2, (p.bgHofs(2) >> 3) + c, (p.bgVofs(2) >> 3) + r);
+        return (e & 0x2000) ? (e & 0x1ff) : -1;
+      };
+      for (int c = 1; c < 31 && !slid; c++) slid = at(c) != at(0);  // (31 offsets none shown: the card's 0)
+    }
+  return slid;
+}
+
 void SmasGame::beginLine(Ppu& ppu, int row) {
+  // (The wipe's first frame: the game sets its offsets in the vblank before it, after beforeFrame looked:
+  // seen here, at the picture's first line, so that frame's margins are kept too.)
+  if (row == 0) wipeNow_ = game_ == GameId::SMB2 && (picture_ || select_) && wipeSliding();
   if (row == 0) applyPlayerPalette(ppu);
   if (Smb1Engine* e = engine()) {
     e->coopLine(ppu, row);
@@ -928,7 +936,10 @@ void SmasGame::beginLine(Ppu& ppu, int row) {
     smb2_->paradeSprites(ppu, parade_ ? extR_ : 0);
     wasParade_ = parade_;
   }
-  if (blackWide_ || wipeFrames_ > 0) ppu.maskWide = true;
+  if (blackWide_) ppu.maskWide = true;
+  // (SMB2's wipe from one picture to the other: the margins stay as the old picture had them until it's
+  // done, then the new picture's come in, rather than going black in between)
+  if (wipeFrames_ > 0 || wipeNow_) ppu.keepWide = true;
   // (The arena round: no one can be there, dimmed as SMB2's wrapping areas.
   // Not the round's panel, the map's other half, between rounds.)
   if (battle_ && dimWrap && !(ppu.bgHofs(0) & 0x100)) ppu.dimLeft = ppu.dimRight = 96;

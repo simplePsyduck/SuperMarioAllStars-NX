@@ -132,7 +132,8 @@ struct App {
   static constexpr int kStateSlots = 25;  // save-state slots (state1.sst .. state25.sst)
   int stateSlot = 1;
   double sramTimer = 0;
-  bool sramFailed = false;  // the last save of game progress failed (reported once)
+  bool sramFailed = false;
+  bool videoThreadFailed = false;  // (the video thread stopped answering: one thread until the program restarts)  // the last save of game progress failed (reported once)
   std::vector<int16_t> audioBuf;
   bool fastForward = false;
   // Rewind: a snapshot every other frame (see stepRewind).

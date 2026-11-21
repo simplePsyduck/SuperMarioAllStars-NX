@@ -18,6 +18,7 @@ Snes::Snes() : cpu(this) {
   std::memset(wram, 0, sizeof(wram));
   std::memset(sram, 0, sizeof(sram));
   execMap_.assign(1 << 21, 0);
+  buildPages();
 }
 
 bool Snes::loadRom(const std::vector<uint8_t>& data) {
@@ -29,6 +30,7 @@ bool Snes::loadRom(const std::vector<uint8_t>& data) {
   rom.resize(sz, 0xff);
   romMask_ = sz - 1;
   patchRom.assign(0x80000, 0xff);
+  buildPages();
   return true;
 }
 
@@ -121,7 +123,7 @@ void Snes::buildLineEvents() {
   while (evIdx_ < evCount_ && evPos_[evIdx_] <= hPos_ && evPos_[evIdx_] != lineLen_) evIdx_++;
 }
 
-void Snes::tick(int mc) {
+void Snes::tickSlow(int mc) {
   while (mc > 0) {
     int next = evPos_[evIdx_];
     int step = next - hPos_;
@@ -251,21 +253,13 @@ int Snes::accessTime(uint32_t adr) const {
   return 8;
 }
 
-uint8_t Snes::cpuRead(uint32_t adr) {
-  tick(cpuFast_ ? accessTime(adr) >> 1 : accessTime(adr));  // (6, 8, 12: halved exactly; see setCpuFast)
-  uint8_t v = busRead(adr);
-  openBus_ = v;
-  if (rwatchFn_) {
-    uint32_t n = adr;
-    if (((adr >> 16) & 0x40) == 0 && (adr & 0xffff) < 0x2000) n = 0x7e0000 | (adr & 0xffff);
-    if (n >= rwatchLo_ && n <= rwatchHi_) rwatchFn_(rwatchCtx_, n, v, cpu.lastPc);
-  }
-  return v;
+void Snes::readWatched(uint32_t adr, uint8_t v) {
+  uint32_t n = adr;
+  if (((adr >> 16) & 0x40) == 0 && (adr & 0xffff) < 0x2000) n = 0x7e0000 | (adr & 0xffff);
+  if (n >= rwatchLo_ && n <= rwatchHi_) rwatchFn_(rwatchCtx_, n, v, cpu.lastPc);
 }
 
-void Snes::cpuWrite(uint32_t adr, uint8_t v) {
-  tick(cpuFast_ ? accessTime(adr) >> 1 : accessTime(adr));  // (6, 8, 12: halved exactly; see setCpuFast)
-  openBus_ = v;
+void Snes::writeSlow(uint32_t adr, uint8_t v) {
   if (watchFn_ || nWriteHooks_) {
     // Low WRAM mirrors are reported as $7Exxxx
     uint32_t n = adr;
@@ -277,6 +271,44 @@ void Snes::cpuWrite(uint32_t adr, uint8_t v) {
     return;
   }
   busWrite(adr, v);
+}
+
+// The page tables cpuRead and cpuWrite take (what busRead, busWrite and accessTime say for each 8 KB page, where the
+// whole page is alike). ROM, the patch ROM and SRAM are in place after loadRom; WRAM and SRAM are arrays.
+void Snes::buildPages() {
+  for (int pg = 0; pg < 2048; pg++) {
+    const uint32_t adr = (uint32_t)pg << 13;
+    const uint8_t bank = adr >> 16;
+    const uint16_t a = adr & 0xffff;
+    const uint8_t b7 = bank & 0x7f;
+    const uint8_t* r = nullptr;
+    uint8_t* w = nullptr;
+    if (bank == 0x7e || bank == 0x7f) {
+      r = w = wram + (((bank & 1) << 16) | a);
+    } else if ((bank & 0x40) == 0 && a < 0x8000) {
+      if (a < 0x2000) r = w = wram;  // (else I/O, or nothing)
+    } else if (a >= 0x8000) {
+      if (b7 >= 0x60 && b7 < 0x70) {
+        if (patchRom.size() >= 0x80000) r = patchRom.data() + (((b7 - 0x60) << 15) | (a & 0x7fff));
+      } else if (!rom.empty() && romMask_ >= 0x1fff) {
+        r = rom.data() + ((((size_t)b7 << 15) | (a & 0x7fff)) & romMask_);
+      }
+    } else if (b7 >= 0x70 && b7 < 0x7e) {
+      r = sram;  // (writes: busWrite, for sramDirty)
+    } else if (!rom.empty() && romMask_ >= 0x1fff) {
+      r = rom.data() + ((((size_t)b7 << 15) | (a & 0x7fff)) & romMask_);
+    }
+    rdPage_[pg] = r;
+    wrPage_[pg] = w;
+    // access time: the same over the whole page except $4000-$5FFF of the low banks (12 then 6)
+    const bool mixed = (bank & 0x40) == 0 && a == 0x4000;
+    for (int f = 0; f < 2; f++) {
+      const bool keep = fastRom_;
+      fastRom_ = f;
+      atPage_[f][pg] = mixed ? 0 : (uint8_t)accessTime(adr);
+      fastRom_ = keep;
+    }
+  }
 }
 
 uint8_t Snes::busRead(uint32_t adr) {

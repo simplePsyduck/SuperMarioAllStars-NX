@@ -19,16 +19,23 @@
 //   the save), and Save & Continue goes on from it. A plain Continue still
 //   starts the world again, as does a save from another world.
 // * The Lost Levels saves and loads the level itself: nothing to do.
+// * Super Mario Bros. 2 saves the level within the world too ($00:9152: the file's world and level,
+//   from $04E8, unless the file is further on), and its start from a file takes both ($11:8122:
+//   $0533 = world * 3 + level), but the All-Stars menu hands it level 0 ($00:A333, as Super Mario
+//   Bros.'s): with this on, its files take the saved level, as The Lost Levels' do.
 //
-// * The power-up (all three): the games' saves don't keep it (SMB1 and The
-//   Lost Levels start small, SMB3's map starts with no suit). With this on,
+// * The power-up (all four): the games' saves don't keep it (SMB1 and The
+//   Lost Levels start small, SMB3's map starts with no suit, SMB2 with two
+//   hearts: the extra ones, $04C4, from the level's mushrooms). With this on,
 //   each save also writes it into SRAM the games never use ($70:0600 on: per
 //   All-Stars file and game, a 'P' record with the power-up and a copy of that
 //   game's part of the file as the save left it), and a file started from the
 //   All-Stars menu gets it back if its part is still that copy (a file erased,
 //   copied over or saved with this off has none): SMB1 / LL $0756 (and $0754)
 //   at the first frame of play, SMB3 $0747 / $0748 (Luigi's) when its map is up, and $0429 (the
-//   suit drawn on the map).
+//   suit drawn on the map), SMB2 $04C4 as the level starts ($14:E09D: the life meter filled from
+//   it, so whichever character is picked has them). (SMB2's records follow the other three's:
+//   $70:12C0 on, one per file.)
 //
 // Nothing is kept outside the battery save.
 #pragma once
@@ -62,7 +69,9 @@ public:
   // can start an earlier one). Always (on or off): files saved with this on stay right with it off.
   static constexpr uint32_t kSmb1LoadArea = 0x05c96f;     // LDA $7FFB02 (4)
   // The save routines (their entries): Super Mario Bros., The Lost Levels, Super Mario Bros. 3.
-  static constexpr uint32_t kSaveSmb1 = 0x008f03, kSaveLl = 0x0090ac, kSaveSmb3 = 0x00922d;
+  static constexpr uint32_t kSaveSmb1 = 0x008f03, kSaveLl = 0x0090ac, kSaveSmb3 = 0x00922d, kSaveSmb2 = 0x009152;
+  // Super Mario Bros. 2: a level's start fills the life meter from the extra hearts ($14:E09D: LDY $04C4).
+  static constexpr uint32_t kSmb2Hearts = 0x14e09d;
   static void markExec(Snes& snes);
 
   // `game` is a GameId (as int); `e` the SMB1 engine (Super Mario Bros.'s). True: handled (the
@@ -87,7 +96,8 @@ private:
   uint8_t powerSave_[2] = {};
   int powerLoad_ = 0;      // (GameId: a game just started from the menu, its power-up still to give)
   int powerWait_ = 0;
-  static int partOf(int game, int* size);  // the game's part of a file: its offset in it, and size
+  static int partOf(int game, int* size);
+  static int recordAt(int file, int game);   // SRAM offset of a file's record for the game  // the game's part of a file: its offset in it, and size
   bool recordFor(int game, int* at) const;  // SRAM of the loaded file's record; true if it holds one
   void writePower(int game);
   bool applyPower(int game);

@@ -1,6 +1,7 @@
 // Widescreen / HUD / enemy range / cheats / level select for Super Mario Bros. 2
 // (All-Stars). Addresses come from docs/re/smb2.md.
 #pragma once
+#include <memory>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -150,6 +151,17 @@ private:
   int openFill_ = -1;        // ... the commonest of those
   bool openVertical() const;
   int openVerticalTile(int tx, int ty, int screenX, uint16_t* entry, bool oneScreen, int* keyOut = nullptr) const;
+  int openVerticalTileRaw(int tx, int ty, int screenX, uint16_t* entry, bool oneScreen, int* keyOut) const;
+  // (openVerticalTile's last answer: the renderer asks again pixel by pixel after a blank, and within a tile on one
+  // line the answer only changes with screenX's 16 px column (and the margin's last 16 px): see openVerticalTile)
+  struct OvtMemo {
+    uint64_t stamp = ~0ull;
+    int tx = 0, ty = 0, col = 0, vofs = 0, extL = 0, extR = 0;
+    bool last = false, oneScreen = false;
+    int r = 0;
+    uint16_t e = 0;
+  };
+  mutable OvtMemo ovtMemo_;
   bool oneRoomH_ = false;  // a horizontal area one screen wide (latched as verticalArea_)
   int bg1Vofs_ = 0;        // BG1's vertical scroll this frame (line 0)
  public:
@@ -167,6 +179,17 @@ private:
   int jarRow0_[3] = {};
   bool jarKeep_[3][2][28][32] = {};  // [layer][0: joined to the left edge, 1: the right][row][col]
   void jarEdges(const Ppu& ppu);
+  void jarEdgesWork(const Ppu& ppu);
+  // (jarEdges' inputs when it last worked: the two layers' scroll, map place and size, map words, and whether the
+  // area is open or walled; the same again, its results stand)
+  struct JarInputs {
+    uint16_t hofs[2], vofs[2], mapBase[2];
+    uint8_t mapSize[2];
+    bool open;
+    uint16_t map[2][4096];
+  };
+  std::unique_ptr<JarInputs> jarIn_;
+  bool jarInValid_ = false;
   int jarTile(const Ppu& ppu, int layer, int tx, int ty, uint16_t* entry) const;
   bool openMirror_[3] = {};  // an open vertical area's layers mirrored at the edges (else repeated)
   uint16_t openBlank_[3] = {};

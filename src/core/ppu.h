@@ -1,6 +1,7 @@
 // SNES PPU (S-PPU1/2) scanline renderer with widescreen extension support.
 #pragma once
 #include <cstdint>
+#include <vector>
 #include <cstring>
 #include <string>
 #include "core/jobqueue.h"
@@ -121,6 +122,7 @@ public:
   bool hideWideObj = false;
   bool objGroupMoves = true;  // high frame rate: a character's sprites move as one (off: each on its own; testing)
   bool maskWide = false;     // black out margins for this line
+  bool keepWide = false;     // this line's margins as the last frame left them (a transition between pictures)
   bool skipRender = false;  // no pixels drawn (the lines' game hooks still run): a launcher preview booting out of sight
   bool subStill = false;     // high frame rate: this line's BG layers not moved on the in-between pictures (per line)
   int dimLeft = 0, dimRight = 0;  // darken the left / right margin for this line (0 none .. 256 black)
@@ -296,9 +298,27 @@ private:
   void renderBgFast(int l, int row, int x0, int x1);
   void renderMode7(int l, int row, int x0, int x1);
   void renderObj(int row, int x0, int x1);
+  void renderBgOpt(int l, int row, int x0, int x1);
   void computeWindows(int x0, int x1);
+  // computeWindows only works the masks out again when what they depend on changed (see there).
+  struct WinKey {
+    uint8_t sel[6], logic[6], l[2], r[2];
+    int shift, mode, x0, x1;
+  };
+  WinKey winKey_ = {};
+  bool winKeyValid_ = false;
   void applyRemap(int l, int x0, int x1);
   void edgeRemap(int l, PpuLayerRemap* rm);
+  // (edgeRemap's search for the repeating span at each edge, per layer and line, as last worked out: the same
+  // line of pixels gives the same answer, and picture screens hold still. remapRow_: the line being drawn,
+  // -1 for none (the in-between pictures))
+  struct EdgeFind {
+    bool valid = false, fl = false, fr = false;
+    int sl = 0, pl = 1, sr = 0, pr = 1;
+    uint32_t key[2][256];
+  };
+  std::vector<EdgeFind> edgeFind_;
+  int remapRow_ = -1;
   uint16_t mapEntry(int l, int tx, int ty) const;
   uint16_t directColor(uint8_t idx, uint8_t pal) const;
   void buildLut();

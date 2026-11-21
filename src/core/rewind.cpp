@@ -160,6 +160,18 @@ void Rewind::push(const std::vector<uint8_t>& state) {
   cur_ = state;
 }
 
+void Rewind::push(std::vector<uint8_t>&& state) {
+  if (!cur_.empty()) {
+    deltas_.push_back(encode(cur_, state));
+    bytes_ += deltas_.back().size();
+    while (!deltas_.empty() && (bytes_ > maxBytes_ || deltas_.size() + 1 > maxSnapshots_)) {
+      bytes_ -= deltas_.front().size();
+      deltas_.pop_front();
+    }
+  }
+  cur_.swap(state);
+}
+
 bool Rewind::stepBack(std::vector<uint8_t>* out) {
   if (deltas_.empty()) return false;
   std::vector<uint8_t> older;

@@ -313,6 +313,13 @@ int Smb1Engine::p2X() const { return p2_[varIndex(0x0078)] * 256 + p2_[varIndex(
 // size).
 void Smb1Engine::p2Sync() {
   if (!p2Known_ && lostLevels_) luigiLive_ = ram(0x0753) != 0;  // (a Luigi game: Mario joins him)
+  if (!p2Known_ && !lostLevels_ && luigiGame_) {
+    // (Super Mario Bros.' 1P LUIGI GAME: Mario joins him. Co-op's way from here: the game's player
+    // its Mario ([CurrentPlayer] 0, his controller the first), Luigi shown and moved as co-op shows
+    // and moves him (see luigiFrame), Mario the one kept aside on the second controller.)
+    luigiLive_ = true;
+    snes_.wram[0x0753] = 0;
+  }
   const uint8_t size = p2_[varIndex(0x0754)], status = p2_[varIndex(0x0756)], star = p2_[varIndex(0x07AF)];
   for (int i = 0; i < kVarCount; i++) p2_[i] = snes_.wram[kVars[i]];
   // (his own power-up and star, not the other's: a star was handed on)
@@ -366,6 +373,10 @@ void Smb1Engine::p2Sync() {
     const bool luigi = !luigiLive_;
     p2_[varIndex(0x0753)] = luigi;
     p2_[varIndex(0x0EC2)] = luigi;
+  } else {
+    // (Super Mario Bros.: Luigi's own sprites (The Lost Levels', which the game has behind $0EC2) for
+    // whichever of the two is Luigi, not Mario recoloured)
+    p2_[varIndex(0x0EC2)] = !luigiLive_;
   }
   p2Box_[2] = (int)boxFrame_[0];
   p2Valid_ = true;
@@ -756,7 +767,15 @@ void Smb1Engine::titleFrame() {
   const TitleLayout& L = lostLevels_ ? kTitleLl : kTitleSmb1;
   uint16_t* vram = snes_.ppu.vram;
   const uint8_t mode = ram(0x0770);
+  // (1P MARIO GAME / 1P LUIGI GAME: see smb1luigi.cpp. The game started from it as Luigi: his from its
+  // first frame.)
+  if (titleMode_ == 0 && mode == 1 && luigiMenu_) {
+    luigiGame_ = !lostLevels_ && luigiPick_ && titleCursor_ == 0;
+    if (luigiGame_) snes_.wram[0x0753] = snes_.wram[0x0EC2] = 1;
+  }
   if (titleMode_ == 0 && mode == 1 && titleShown_) titlePick_ = titleCursor_ == 2;
+  if (mode == 0) luigiGame_ = false;
+  luigiTitleFrame(mode);
   titleMode_ = mode;
   // (the menu up: its two choices and the cursor's column untouched; not
   // while the demo's level scrolls in over it)
@@ -1107,6 +1126,8 @@ void Smb1Engine::coopFrame() {
     }
   }
   if (coop_ && lostLevels_ && liveCtrl_ && ram(0x0770) == 3 && !p2_.empty()) swapRoles();
+  // (Super Mario Bros.: the game's player in Luigi's own sprites when he's Luigi (see p2Sync))
+  if (!lostLevels_ && coop_) snes_.wram[0x0EC2] = luigiLive_ ? 1 : 0;
   // (the player kept aside hit: his injury timer starts)
   if (coop_ && !p2_.empty()) {
     const uint8_t inj = p2_[varIndex(0x07AE)];

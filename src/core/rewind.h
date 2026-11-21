@@ -17,6 +17,7 @@ public:
   void clear();
   // Records `state` as the newest snapshot.
   void push(const std::vector<uint8_t>& state);
+  void push(std::vector<uint8_t>&& state);  // (the same, taking the state over: no 270 KB copy)
   // Steps back one snapshot: drops the newest and puts the one before it in
   // `out`. False when there is nothing older.
   bool stepBack(std::vector<uint8_t>* out);

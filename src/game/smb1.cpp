@@ -128,6 +128,7 @@ Smb1Engine::Smb1Engine(Snes& snes, uint8_t bankLo, uint8_t bankHi) : snes_(snes)
   uint32_t d = findSig(kSigDespawn, sizeof(kSigDespawn), bankLo, bankHi);
   if (x && s && d) {
     spawnOp_ = s + 5;
+    spawnAdc_ = s + 4;
     despawnLOp_ = d + 3;
     despawnROp_ = d + 18;
     ok_ = true;
@@ -167,6 +168,39 @@ Smb1Engine::Smb1Engine(Snes& snes, uint8_t bankLo, uint8_t bankHi) : snes_(snes)
   }
   if (uint32_t g = findSig(kSigGroup, sizeof(kSigGroup), bankLo, bankHi)) groupPlaced_ = g + sizeof(kSigGroup);
   springSlot_ = findSig(kSigSpring, sizeof(kSigSpring) / 2, bankLo, bankHi);
+  // OffscreenBoundsCheck's end: CPY #$31; BEQ; CPY #$32; BEQ; JSR EraseEnemyObject; RTS
+  // (SMB1 $03:DC5E, LL $0D:DB5F)
+  {
+    static const uint16_t kSigBound[] = {0xC0, 0x31, 0xF0, 0x100, 0xC0, 0x32, 0xF0, 0x100, 0x20, 0x100, 0x100, 0x60};
+    uint32_t b = findSig(kSigBound, sizeof(kSigBound) / 2, bankLo, bankHi);
+    boundErase_ = b ? b + 8 : 0;
+  }
+  // FindEmptyEnemySlot for the objects the area builds (pipes' plants, lifts...): LDX #$00; CLC;
+  // LDA Enemy_Flag,X; BEQ; INX; CPX #$08; BNE; RTS (SMB1 $03:AA6A, LL $0D:A7FD)
+  {
+    static const uint16_t kSigFree[] = {0xA2, 0x00, 0x18, 0xB5, 0x10, 0xF0, 0x05, 0xE8, 0xE0, 0x08, 0xD0, 0xF6, 0x60};
+    freeSlot_ = findSig(kSigFree, sizeof(kSigFree) / 2, bankLo, bankHi);
+  }
+  // The flagpole area object (SMB1 $03:AAEF, LL $0D:A880): JSR GetAreaObjXPosition; SEC; SBC #$08
+  // (LL CLC; ADC); STA $021F; LDA $0725; SBC #$00; STA $7E; LDA #$30; STA $023D; ...; LDA #$30;
+  // STA Enemy_ID+5; INC Enemy_Flag+5; LDA #$FF; STA $0FB4-$0FB7; RTS. (Hooked at the SEC / CLC.)
+  // FlagpoleRoutine: LDX #$05; STX ObjectOffset; LDA Enemy_ID,X; CMP #$30 (SMB1 $03:B8F5, LL $0D:B6A1).
+  // FlagpoleSlide: LDA Enemy_ID+5; CMP #$30 (SMB1 $03:B309, LL $0D:B05B).
+  {
+    static const uint16_t kSigFlag[] = {0x8D, 0x1F, 0x02, 0xAD, 0x25, 0x07, 0x100, 0x00, 0x85, 0x7E, 0xA9, 0x30, 0x8D, 0x3D, 0x02};
+    static const uint16_t kSigRoutine[] = {0xA2, 0x05, 0x86, 0x9E, 0xB5, 0x1C, 0xC9, 0x30};
+    static const uint16_t kSigSlide[] = {0xA5, 0x21, 0xC9, 0x30, 0xD0};
+    flagMake_ = flagRts_ = 0;
+    const uint32_t a = findSig(kSigFlag, sizeof(kSigFlag) / 2, bankLo, bankHi);
+    flagRoutine_ = findSig(kSigRoutine, sizeof(kSigRoutine) / 2, bankLo, bankHi);
+    flagSlide_ = findSig(kSigSlide, sizeof(kSigSlide) / 2, bankLo, bankHi);
+    if (a && flagRoutine_ && flagSlide_ && snes_.peek(a + 0x28) == 0x60 &&
+        (snes_.peek(a - 2) == 0xE9 || snes_.peek(a - 2) == 0x69)) {
+      flagMake_ = a - 3;
+      flagRts_ = a + 0x28;
+      flagMinus_ = snes_.peek(a - 2) == 0xE9;
+    }
+  }
   if (uint32_t b = findSig(kSigBowserHi, sizeof(kSigBowserHi), bankLo, bankHi)) {
     bowserBig_[0] = b + 2;
     bowserBig_[1] = b + 5;
@@ -247,6 +281,12 @@ Smb1Engine::Smb1Engine(Snes& snes, uint8_t bankLo, uint8_t bankHi) : snes_(snes)
 void Smb1Engine::reset() {
   fireClear();
   carried_ = -1;
+  thrown_ = -1;
+  frozenParser_ = -1;
+  luigiCoop_ = false;
+  flagSlot_ = 5;
+  // (a Luigi game's state loaded: [CurrentPlayer] 1 in a one-player game is only ever ours)
+  luigiGame_ = !lostLevels_ && ram(0x0770) != 0 && ram(0x0753) == 1 && ram(0x077A) == 0;
   for (int& c : colWorld_) c = -100000;
   clearShadow();
   curWrites_ = 0;
@@ -410,6 +450,14 @@ void Smb1Engine::markExec() {
   if (firebarCollEnd_) snes_.markExec(firebarCollEnd_, true);
   if (groupPlaced_) snes_.markExec(groupPlaced_, true);
   if (springSlot_) snes_.markExec(springSlot_, true);
+  if (freeSlot_) snes_.markExec(freeSlot_, true);
+  if (spawnAdc_) snes_.markExec(spawnAdc_, true);
+  if (flagMake_) {
+    snes_.markExec(flagMake_, true);
+    snes_.markExec(flagRoutine_, true);
+    snes_.markExec(flagSlide_, true);
+  }
+  if (boundErase_) snes_.markExec(boundErase_, true);
   for (uint32_t pc : {enemyCall_, enemyRet_, oamUpload_, bbRead_})
     if (pc) snes_.markExec(pc, true);
   for (uint32_t pc : rel16Sites_) snes_.markExec(pc, true);
@@ -422,7 +470,12 @@ void Smb1Engine::markExec() {
   if (carryTouch_) {
     snes_.markExec(carryTouch_, true);
     snes_.markExec(carryKick_, true);
+    if (carryKnock_) snes_.markExec(carryKnock_, true);
+    if (pirOuter_) snes_.markExec(pirOuter_, true);
+    if (pirInner_) snes_.markExec(pirInner_, true);
   }
+  for (uint32_t pc : {luigiJump_, luigiFall_, luigiFriction_, luigiTurn_})
+    if (pc) snes_.markExec(pc, true);
   if (titleInput_) {
     snes_.markExec(titleInput_, true);
     snes_.markExec(titleInput_ + (lostLevels_ ? 0x28 : 0x2A), true);
@@ -435,6 +488,7 @@ void Smb1Engine::markExec() {
 void Smb1Engine::frameStart(int want, bool active, bool hudAnchor) {
   hudAnchor_ = hudAnchor;
   carryFrame();  // (Pick Up & Carry Koopa Shells: smb1carry.cpp)
+  luigiFrame();  // (1P Luigi game: smb1luigi.cpp)
   if (coopOk_) coopFrame();  // (co-op: see smb1coop.cpp)
   ref16Writes_ = 0;  // (a game frame draws within one emulated frame)
   uint8_t operMode = ram(0x0770), task = ram(0x0772);
@@ -447,10 +501,18 @@ void Smb1Engine::frameStart(int want, bool active, bool hudAnchor) {
   bool title = operMode == 0 && task == 3;
   gameplay_ = (operMode == 1 && task == 3) || title;
   cam16_ = camera();
-  trackParser();  // (a castle loop moves the column history before this frame is drawn)
+  // (Start pressed on the title: it fades out as it was, while the game sets up the level (its parser
+  // back to 0). Its margins go on as they were drawn until the screen is dark: see frozenParser_.)
+  if (titleL_ >= 0 && !title) {
+    if (frozenParser_ < 0) frozenParser_ = lastParser_;
+  } else {
+    frozenParser_ = -1;
+  }
+  if (frozenParser_ < 0) trackParser();  // (a castle loop moves the column history before this frame is drawn)
   // Clouds stream only while $0EDC is set ($04:8B51); night levels leave the
   // BG3 mode at 1 with a stale panorama from an earlier level.
-  cloudStream_ = cloudTiles_ != 0 && ram(0x005c) == 1 && ram(0x0edc) != 0;
+  // (kept as it was while the title fades out: the area type is already the next level's)
+  if (frozenParser_ < 0) cloudStream_ = cloudTiles_ != 0 && ram(0x005c) == 1 && ram(0x0edc) != 0;
   // Single-screen rooms (the underground coin rooms, LL 8-4's two-pipe room)
   // have the scroll locked from the moment play starts in them, the camera on
   // a page boundary: show them centred (padded or open: see padRoom_ below).
@@ -559,13 +621,21 @@ void Smb1Engine::frameStart(int want, bool active, bool hudAnchor) {
   // and groups land where they do on the console).
   enemyRange_ = active && extR_ > 0 && gameplay_ && !title && !padRoom_ && !openRoom_;
   if (enemyRange_) rescueSpring();
+  if (enemyRange_) holdRetainer();
+  if (extL_ || extR_) victoryRetainer();
   if (enemyRange_) {
-    int spawn = 0x30 + extR_;
+    // (A castle's firebars: flames up to 12 x 8 px out from their pivots, so its objects come in that
+    // much sooner, before a flame can show in the margin. Area type, $5C, 3: a castle.)
+    int spawn = std::min(0x30 + extR_ + (ram(0x005C) == 3 ? 0x60 : 0), 0xE0);
     int left = std::min(std::max(0x48, extL_ + 16), 150);
     int right = spawn + 24;
     patch(spawnOp_, (uint8_t)spawn);
     patch(despawnLOp_, (uint8_t)left);
     patch(despawnROp_, (uint8_t)right);
+    // (Piranha plants and Hammer Bros. are let go 56 px sooner on the left, $38 added before the
+    // bound's $48: 16 px past the 4:3 screen's edge. Past the wide view's edge here, the same 16 px:
+    // left as it was, a plant left behind vanished in the left margin.)
+    patch(despawnLOp_ - 2, (uint8_t)std::max(0, left - extL_ - 16));
     for (uint32_t op : edgeSpawnOps_) patch(op, (uint8_t)(0x20 + extR_));
   } else {
     unpatchAll();
@@ -750,15 +820,23 @@ void Smb1Engine::checkBg2Source() {
     }
     match = abs >= 0 && bg2Period_ > 0;
     bool fitAll = match;
-    int nonSky = 0;
+    int nonSky = 0, misses = 0;
     for (int i = 0; i < 6 && match; i++) {
       int col = (abs >> 3) + 2 + i * 5;
       vramCol(col, v);
       // After a castle maze loop the columns on screen were streamed from 512
       // px (64 columns) further on: either fits.
       if (!fits(v, col + bg2Off_) && !fits(v, col + bg2Off_ + 64) && !fits(v, col + bg2Off_ - 64)) {
-        match = fitAll = false;
-        break;
+        // (One column off is let pass: near a level's end the column at the
+        // screen's left edge can be one the game hasn't rewritten yet (1-2's
+        // way out: the margins fell back to the screen's repeat, the hills cut
+        // off at its edges). Two are not.)
+        fitAll = false;
+        if (++misses > 1) {
+          match = false;
+          break;
+        }
+        continue;
       }
       for (int r = 1; r < 31; r++) nonSky += v[r] != v[r - 1];
     }
@@ -783,10 +861,17 @@ void Smb1Engine::checkBg2Source() {
   if (bg2Votes_ <= -5) bg2Source_ = false;
 }
 
+// How far a firebar's flames reach from its pivot (the long ones' twelve flames, with room).
+static constexpr int kFirebarReach = 104;
+
 bool Smb1Engine::onExec(uint32_t pc) {
   if (pc == fbRet_ && fbRet_) return fireExec();
   if (injStore_ && (pc == injStore_ || pc == injShrink_)) return injExec(pc);
-  if (carryTouch_ && (pc == carryTouch_ || pc == carryKick_)) return carryExec(pc);
+  if (carryTouch_ && (pc == carryTouch_ || pc == carryKick_ || (pc == carryKnock_ && carryKnock_) ||
+                      (pirOuter_ && (pc == pirOuter_ || pc == pirInner_))))
+    return carryExec(pc);
+  if (luigiJump_ && (pc == luigiJump_ || pc == luigiFall_ || pc == luigiFriction_ || (pc == luigiTurn_ && luigiTurn_)))
+    return luigiExec(pc);
   if ((titleInput_ && (pc == titleInput_ || pc == titleInput_ + (lostLevels_ ? 0x28u : 0x2Au))) || (livesSet_ && pc == livesSet_))
     return titleExec(pc);
   if (coopOk_ && (pc == coopCall_ || pc == coopAfter_ || pc == coopDrawEnd_ || pc == coopEnemyAt_ || pc == coopLeftHi_ ||
@@ -874,12 +959,74 @@ bool Smb1Engine::onExec(uint32_t pc) {
       int x = oamX_[i];
       if (set && x9 < 256) {
         set = x == x9;
+        if (!set && ((x - x9) & 511) == 0) {  // (512 px out: hidden, see the X fix-up)
+          set = true;
+          x = -kMaxExt - 64;
+        }
       } else if (set && ((x - x9) & 511) != 0) {
         set = x9 < 512 - 32;
         x = -kMaxExt - 64;
       }
       snes_.ppu.objTrueX[i] = (int16_t)x;
       snes_.ppu.objTrueXSet[i] = set;
+      // An 8x8 sprite just below the screen (a floor firebar's flames, turning downwards: Y up to
+      // $FF) has its last row wrap to the top line, the NES the game was written for hiding it.
+      // At the top of the margins, out of the TV's overscan, it showed: hidden there.
+      const uint8_t y = ram(0x0801 + 4 * i);
+      if (wide && y >= 0xf9 && !((ram(0x0a00 + (i >> 2)) >> ((i & 3) * 2)) & 2))
+        snes_.wram[0x0801 + 4 * i] = 0xf0;
+    }
+    return false;
+  }
+  if (flagMake_ && (pc == flagMake_ || pc == flagRoutine_ || pc == flagSlide_)) return flagExec(pc);
+  if (pc == spawnAdc_ && spawnAdc_) {
+    // The castle's last object, the retainer (Toad, the Princess: $35), comes at the 4:3 game's
+    // distance. Its All-Stars code takes enemy slot 0 for its own (it is there when it comes on
+    // the console, after the axe cleared the slots): come early, in another, it set slot 0's Y,
+    // the Bowser's or his flame's, and drew into its sprites, all garbled (3-4's fight; also once
+    // Bowser fell to fireballs, the retainer then erased by the axe and never seen).
+    if (!enemyRange_) return false;
+    const uint32_t ptr = ram(0x00FD) | ram(0x00FE) << 8 | ram(0x00FF) << 16;
+    auto at = [&](int k) { return snes_.peek((ptr & 0xff0000) | ((ptr + ram(0x0739) + k) & 0xffff)); };
+    if ((at(0) & 0x0f) >= 0x0e || (at(1) & 0x3f) != 0x35) return false;
+    const int a = (r.a & 0xff) + 0x30 + (r.c ? 1 : 0);  // (ADC #$30, as the game's own)
+    r.c = a > 0xff;
+    r.a = (uint16_t)((r.a & 0xff00) | (a & 0xff));
+    r.n = a & 0x80;
+    r.z = (a & 0xff) == 0;
+    r.pc = (uint16_t)(r.pc + 2);
+    return true;
+  }
+  if (pc == freeSlot_ && freeSlot_) {
+    // The area's objects take the first free slot of 0-7. Slot 5 is the flagpole flag's: the game
+    // puts it there whatever is in it as the pole is built. The wide view keeps enemies longer, so
+    // 0-4 can all be taken as an object comes, and it went to 5, then lost to the flag a moment later
+    // (3-3's and 6-1's balance lifts: one of the pair gone, the other left hanging). Here slot 5 is
+    // taken last: 0-4, 6, 7, then 5 (as the game, X the slot and carry clear; none, X 8, carry set).
+    if (!enemyRange_) return false;
+    static const int kOrder[8] = {0, 1, 2, 3, 4, 6, 7, 5};
+    int slot = 8;
+    for (int k : kOrder)
+      if (!ram(0x0010 + k)) {
+        slot = k;
+        break;
+      }
+    r.x = (uint16_t)((r.x & 0xff00) | slot);
+    r.c = slot >= 8;
+    r.z = false;  // (as after BEQ's taken... the callers only look at carry and X)
+    r.pc = (uint16_t)(r.pc + 12);  // (its RTS)
+    return true;
+  }
+  if (pc == boundErase_ && boundErase_) {
+    // A firebar left behind: its flames reach up to 12 x 8 px from its pivot, so it is kept until all
+    // of them are past the wide view's left edge (it went when its pivot did, flames still showing).
+    const int x = r.x & 0xff;
+    const uint8_t id = ram(0x001C + x);
+    if (!enemyRange_ || id < 0x1B || id > 0x1F) return false;
+    const int ex = (int8_t)ram(0x0079 + x) * 256 + ram(0x021A + x);
+    if (ex >= cam16_ - extL_ - 16 - 96 && ex < cam16_ + 128) {
+      r.pc = (uint16_t)(r.pc + 3);  // (on to its RTS)
+      return true;
     }
     return false;
   }
@@ -1163,9 +1310,17 @@ bool Smb1Engine::onExec(uint32_t pc) {
     firebarDraw_ = true;  // (its flames reach further from it than an enemy's sprites)
     int x = r.x & 0xff;
     uint8_t v = ram(0x03d1);
-    if (!(extL_ || extR_) || x > 5 || !(v & 0x0f)) return false;
+    // (All eight enemy slots: the wide view's castles fill 6 and 7 with bars too, which popped in
+    // at the 4:3 edge. A pivot past the view's edge still has flames reaching into it: those are
+    // drawn, each flame shown only in the view (see firebarWrap_).)
+    if (!(extL_ || extR_) || x > 7 || !(v & 0x0f)) return false;
     int rel = (int8_t)ram(0x0079 + x) * 256 + ram(0x021a + x) - camera();
-    if (!(rel > 256 - 16 && rel < 256 + extR_) && !(extL_ > 0 && rel < 0 && rel >= -extL_ - 16)) return false;
+    const int reach = enemyRange_ ? kFirebarReach : 0;
+    // (A pivot just inside the 4:3 screen's left edge has the game's offscreen bits too: the bar
+    // vanished for a frame as it crossed it.)
+    const bool right = rel > 256 - 16 && rel < 256 + extR_ + reach;
+    const bool left = extL_ > 0 && rel <= 256 - 16 && rel >= -extL_ - 16 - reach;
+    if (!right && !left) return false;
     // (Original timing: as on the console while any of its pivot, 8 px, is on
     // the 4:3 screen.)
     if (!enemyRange_ && rel > -8 && rel < 256) return false;
@@ -1332,9 +1487,15 @@ void Smb1Engine::onWrite(uint32_t adr, uint8_t v, uint32_t pc) {
     // (Not the clearing of all of them as a game frame starts, STZ, which
     // can come before the display frame does.)
     uint8_t op = snes_.peek(pc);
-    if ((a & 3) == 0 && op != 0x9e && op != 0x9c && op != 0x74 && op != 0x64) {
+    if ((a & 3) == 0 && (op == 0x9e || op == 0x9c || op == 0x74 || op == 0x64)) {
+      ourHiLive_[(a - 0x0c00) >> 2] = false;  // (a new game frame: the choice below is spent)
+    } else if ((a & 3) == 0) {
       int slot = (a - 0x0c00) >> 2;
-      if (ourHiFrame_[slot] == snes_.frameCount()) {
+      // (Chosen during this game frame. A game frame can run past the display
+      // frame's end (co-op runs the objects twice): the flame's high byte then
+      // came in the next one and cleared bit 8, a flame of a bar at the right
+      // edge showing at the left one, flickering.)
+      if (ourHiLive_[slot] && snes_.frameCount() - ourHiFrame_[slot] <= 1) {
         if (ourHi_[slot]) snes_.wram[0x0c00 + (a - 0x0c00)] |= 1;
       } else {
         gameHiFrame_[slot] = snes_.frameCount();
@@ -1373,6 +1534,7 @@ void Smb1Engine::onWrite(uint32_t adr, uint8_t v, uint32_t pc) {
         oamXSet_[slot] = 1;
         ourHiFrame_[slot] = snes_.frameCount();
         ourHi_[slot] = best != v;
+        ourHiLive_[slot] = true;
       }
       return;
     }
@@ -1398,7 +1560,9 @@ void Smb1Engine::onWrite(uint32_t adr, uint8_t v, uint32_t pc) {
         }
       }
       int reach = firebarRel_ ? 104 : 48;  // (a long firebar's flames: 12 x 8 px)
-      bool high = best != v && bestD < reach && best >= -extL_ - 32 && best < 256 + extR_ + 32;
+      // (Off the view, bit 8 still keeps it off the display: a firebar's pivot flame, its bar
+      // reaching into the view from beyond either edge, showed 256 px from it.)
+      bool high = bestD < reach && (best & 0x1ff) >= 256;
       hi = high ? (hi | 1) : (hi & ~1);
       if (bestD < reach) {
         // Its true place, even where 9 bits can't tell (beyond the right
@@ -1410,6 +1574,7 @@ void Smb1Engine::onWrite(uint32_t adr, uint8_t v, uint32_t pc) {
       }
       ourHiFrame_[slot] = snes_.frameCount();
       ourHi_[slot] = high;
+      ourHiLive_[slot] = true;
     }
   }
 }
@@ -1471,6 +1636,46 @@ bool Smb1Engine::leavesBuilt(int x) {
 // margin (5-1's Koopa, 2-2's Blooper popped in). A walker or swimmer that
 // starts there begins just beyond the view's edge instead, on built ground
 // that is clear (as a late group does), and comes in from off the display.
+// The axe clears the enemy slots: a retainer that had come early (saves from before the fix
+// above) was erased, its entry read, and the victory walk found no one. Read again.
+void Smb1Engine::victoryRetainer() {
+  if (ram(0x0770) != 2 || ram(0x005C) != 3) {
+    retainerSeen_ = false;
+    return;
+  }
+  for (int k = 0; k < 8; k++)
+    if (ram(0x0010 + k) && ram(0x001C + k) == 0x35) retainerSeen_ = true;
+  if (retainerSeen_) return;
+  const uint32_t ptr = ram(0x00FD) | ram(0x00FE) << 8 | ram(0x00FF) << 16;
+  const int off = ram(0x0739);
+  if (off < 2 || ram(0x073B)) return;
+  auto at = [&](int d) { return snes_.peek((ptr & 0xff0000) | ((ptr + off + d) & 0xffff)); };
+  if ((at(-2) & 0x0f) >= 0x0e || (at(-1) & 0x3f) != 0x35) return;
+  snes_.wram[0x0739] = (uint8_t)(off - 2);
+  if (at(-1) & 0x80) snes_.wram[0x073A] = (uint8_t)(ram(0x073A) - 1);
+  retainerSeen_ = true;  // (once)
+}
+
+// A retainer that came early, in another slot than 0 (see spawnAdc_; saves from before the fix
+// hold one), goes back to the enemy list, to come again at the 4:3 game's distance.
+void Smb1Engine::holdRetainer() {
+  if (!gameplay_) return;
+  for (int k = 1; k < 8; k++) {
+    if (!ram(0x0010 + k) || ram(0x001C + k) != 0x35) continue;
+    const uint32_t ptr = ram(0x00FD) | ram(0x00FE) << 8 | ram(0x00FF) << 16;
+    const int off = ram(0x0739);
+    if (off < 2) return;
+    auto at = [&](int d) { return snes_.peek((ptr & 0xff0000) | ((ptr + off + d) & 0xffff)); };
+    // (Only the entry just read, its own: back over it, and over its page flag if it had one.)
+    if ((at(-2) & 0x0f) >= 0x0e || (at(-1) & 0x3f) != 0x35 || ram(0x073B)) return;
+    snes_.wram[0x0739] = (uint8_t)(off - 2);
+    if (at(-1) & 0x80) snes_.wram[0x073A] = (uint8_t)(ram(0x073A) - 1);
+    snes_.wram[0x0010 + k] = 0;
+    snes_.wram[0x001C + k] = 0;
+    return;
+  }
+}
+
 // Objects tied to a place (cannons, pipes, firebars, platforms, frenzies,
 // Hammer Bros on their bricks) and hopping Paratroopas start where the game
 // puts them.
@@ -1898,4 +2103,55 @@ void Smb1Engine::makeFill() {
     }
   }
   fillValid_ = true;
+}
+
+// The flagpole's flag goes to enemy slot 5, whatever is there: the game keeps 0-4 for its enemies,
+// but its enemy loop also spawns into 5 when 0-4 are all taken, which the wide view (enemies kept
+// longer) makes happen: 3-3's and 6-1's balance lifts had one of the pair there, and the flag, put
+// in as the pole was built, took its place (the other left hanging, the lift broken). With 5 taken
+// by something else the flag goes to a free slot instead (0-4, then 6, 7), put in as the game does
+// it; the two routines that look for it in slot 5 (the flag's own, which slides it down and shows
+// it, and the player's slide down the pole) are shown that slot. Otherwise the game's, as ever.
+bool Smb1Engine::flagExec(uint32_t pc) {
+  CpuRegs& r = snes_.cpu.r;
+  if (pc == flagMake_) {
+    flagSlot_ = 5;
+    if (!ram(0x0015) || ram(0x0021) == 0x30) return false;  // (slot 5 free, or the flag's own: as ever)
+    static const int kOrder[7] = {0, 1, 2, 3, 4, 6, 7};
+    int k = -1;
+    for (int c : kOrder)
+      if (!ram(0x0010 + c)) {
+        k = c;
+        break;
+      }
+    if (k < 0) return false;  // (nowhere else: the game's way)
+    const int x = ram(0x0725) * 256 + (r.a & 0xff) + (flagMinus_ ? -8 : 8);
+    uint8_t* w = snes_.wram;
+    w[0x021A + k] = (uint8_t)x;
+    w[0x0079 + k] = (uint8_t)(x >> 8);
+    w[0x0238 + k] = 0x30;
+    w[0x010D] = 0xB0;
+    w[0x001C + k] = 0x30;
+    w[0x0010 + k]++;
+    w[0x0FB4] = w[0x0FB5] = w[0x0FB6] = w[0x0FB7] = 0xFF;
+    flagSlot_ = k;
+    r.pc = (uint16_t)flagRts_;  // (on to its RTS: done)
+    return true;
+  }
+  const int k = flagSlot_;
+  if (k == 5 || ram(0x001C + k) != 0x30 || !ram(0x0010 + k)) {
+    flagSlot_ = 5;
+    return false;
+  }
+  if (pc == flagRoutine_) {
+    r.x = (uint16_t)((r.x & 0xff00) | k);  // (LDX #$05: its slot)
+    r.pc = (uint16_t)(r.pc + 2);
+    return true;
+  }
+  // (FlagpoleSlide: LDA Enemy_ID+5: its slot's)
+  r.a = (uint16_t)((r.a & 0xff00) | ram(0x001C + k));
+  r.n = false;
+  r.z = false;
+  r.pc = (uint16_t)(r.pc + 2);
+  return true;
 }

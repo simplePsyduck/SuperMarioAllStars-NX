@@ -8,6 +8,7 @@
 #include "statefix.h"
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -66,6 +67,7 @@ const uint64_t* const kSpreadRev = kSpread.rev;
 Ppu::Ppu() { reset(true); }
 
 void Ppu::reset(bool hard) {
+  winKeyValid_ = false;
   waitRender();  // (the worker may still be writing the picture the memset below clears)
   if (hard) {
     std::memset(vram, 0, sizeof(vram));
@@ -423,6 +425,9 @@ void Ppu::renderBgFast(int l, int row, int x0, int x1) {
   const bool hide = hideWideBg[l];
   const bool fetchAll = wideFetchAll[l];
   const int fy0 = py & 7;
+  // (mapEntry's address, the row's part worked out once: 64-wide maps add the right half's page per tile)
+  const bool wideMapX = b.mapSize & 1;
+  const int mapRow = b.mapBase + ((ty & 31) << 5) + (b.mapSize & 2 ? (ty & 32) << (b.mapSize == 3 ? 6 : 5) : 0);
 
   uint8_t pix[8];
   uint8_t cPal = 0, cPri = 0;
@@ -449,7 +454,7 @@ void Ppu::renderBgFast(int l, int row, int x0, int x1) {
       x++;
       continue;
     }
-    if (wr == PpuHooks::kWideVram) e = mapEntry(l, tx, ty);
+    if (wr == PpuHooks::kWideVram) e = vram[(mapRow + (tx & 31) + (wideMapX ? (tx & 32) << 5 : 0)) & 0x7fff];  // (mapEntry)
     int tile = e & 0x3ff;
     cPal = (e >> 10) & 7;
     cPri = (e & 0x2000) ? 2 : 1;
@@ -466,6 +471,11 @@ void Ppu::renderBgFast(int l, int row, int x0, int x1) {
     const uint16_t w1 = bpp >= 4 ? vram[(adr + 8) & 0x7fff] : 0;
     const uint16_t w2 = bpp == 8 ? vram[(adr + 16) & 0x7fff] : 0;
     const uint16_t w3 = bpp == 8 ? vram[(adr + 24) & 0x7fff] : 0;
+    if ((w0 | w1 | w2 | w3) == 0) {  // (the tile's row empty, the sky's: only transparent pixels, as below)
+      for (int i = x; i < end; i++) out[i].pri = 0;
+      x = end;
+      continue;
+    }
     // (each plane's byte spread to one byte per pixel by table, the planes put together by shifts: pixel c
     // is bit 7-c of the planes, or bit c when the tile is flipped across)
     const uint64_t* T = hf ? kSpreadFwd : kSpreadRev;
@@ -502,6 +512,130 @@ void Ppu::renderBgFast(int l, int row, int x0, int x1) {
   }
 }
 
+// renderBg's offset-per-tile case without mosaic (modes 2, 4 and 6, BG1 and BG2: SMB2's title, story,
+// character select, level card and bonus screen), the same pixels with less work. renderBg works each pixel's
+// scroll out from BG3's map, fetches its tile and decodes the tile's row, for every pixel. Here the scroll is
+// worked out once per 8 px column (it is the column's: col = (x + hofs & 7) >> 3), the map entry once per tile,
+// and a row is decoded again only when the entry, the tile column or the row changes. The game's hook is still
+// asked for every pixel where renderBg asks it (the margins, or a layer that wants every tile).
+void Ppu::renderBgOpt(int l, int row, int x0, int x1) {
+  Px* out = layer_[l] + kMaxExt;
+  const Bg& b = bg_[l];
+  const int bpp = kBpp[mode_][l];
+  const int palBase = mode_ == 0 ? l * 32 : 0;
+  const int tileWords = bpp * 4;
+  const bool direct = bpp == 8 && (cgwsel_ & 1);
+  const int ly = row + 1;
+  const int tileShift = b.bigTiles ? 4 : 3;
+  const bool hide = hideWideBg[l];
+  const bool fetchAll = wideFetchAll[l];
+  const int hofs0 = (b.hofs + bgHofsAdj[l]) & 0x3ff, vofs0 = b.vofs + (sub_ ? subVofs_[l] : 0);
+  const Bg& b3 = bg_[2];
+  const uint16_t bit = l == 0 ? 0x2000 : 0x4000;
+  auto m3 = [&](int tx, int ty) {
+    int off = ((ty & 31) << 5) | (tx & 31);
+    switch (b3.mapSize) {
+      case 1: off += (tx & 32) << 5; break;
+      case 2: off += (ty & 32) << 5; break;
+      case 3: off += ((tx & 32) << 5) + ((ty & 32) << 6); break;
+    }
+    return vram[(b3.mapBase + off) & 0x7fff];
+  };
+  int colKey = -1000, hofs = hofs0, vofs = vofs0;  // (the column the scroll was worked out for)
+  int mapKeyTx = -1, mapKeyTy = -1;                 // (the tile mapEntry was read for)
+  uint16_t mapE = 0;
+  bool haveRow = false;  // (pix holds the row decoded for rowE, rowWr, rowPx8, rowPy)
+  uint16_t rowE = 0;
+  int rowWr = 0, rowPx8 = 0, rowPy = 0;
+  uint8_t pix[8] = {};
+  uint8_t cPal = 0, cPri = 0;
+  for (int x = x0; x < x1; x++) {
+    const bool margin = x < 0 || x >= 256;
+    if (margin && hide) {
+      out[x].pri = 0;
+      continue;
+    }
+    if (margin) {
+      hofs = hofs0, vofs = vofs0, colKey = -1000;
+    } else {
+      const int col = (x + (hofs0 & 7)) >> 3;
+      if (col != colKey) {
+        colKey = col;
+        hofs = hofs0, vofs = vofs0;
+        if (col > 0) {
+          const int ox = (((col - 1) << 3) + (b3.hofs & ~7)) >> 3;
+          const int oy = b3.vofs >> 3;
+          if (mode_ == 4) {
+            const uint16_t e = m3(ox, oy);
+            if (e & bit) {
+              if (e & 0x8000) vofs = e & 0x3ff;
+              else hofs = (e & 0x3f8) | (hofs & 7);
+            }
+          } else {
+            const uint16_t eh = m3(ox, oy), ev = m3(ox, oy + 1);
+            if (eh & bit) hofs = (eh & 0x3f8) | (hofs & 7);
+            if (ev & bit) vofs = ev & 0x3ff;
+          }
+        }
+      }
+    }
+    const int px = (x + hofs) & 0x3ff;
+    const int py = (ly + vofs) & 0x3ff;
+    const int tx = px >> tileShift, ty = py >> tileShift;
+    uint16_t e = 0;
+    const int wr = (margin || fetchAll) && hooks ? hooks->fetchWideTile(*this, l, tx, ty, x, &e) : PpuHooks::kWideVram;
+    if (wr == PpuHooks::kWideBlank) {
+      out[x].pri = 0;
+      continue;
+    }
+    if (wr == PpuHooks::kWideVram) {
+      if (tx != mapKeyTx || ty != mapKeyTy) {
+        mapKeyTx = tx, mapKeyTy = ty;
+        mapE = mapEntry(l, tx, ty);
+      }
+      e = mapE;
+    }
+    if (!haveRow || e != rowE || wr != rowWr || (px >> 3) != rowPx8 || py != rowPy) {
+      haveRow = true;
+      rowE = e, rowWr = wr, rowPx8 = px >> 3, rowPy = py;
+      int tile = e & 0x3ff;
+      cPal = (e >> 10) & 7;
+      cPri = (e & 0x2000) ? 2 : 1;
+      const bool hf = e & 0x4000, vf = e & 0x8000;
+      if (b.bigTiles) {
+        int subx = (px >> 3) & 1, suby = (py >> 3) & 1;
+        if (hf) subx ^= 1;
+        if (vf) suby ^= 1;
+        tile += subx + suby * 16;
+      }
+      const int fy = vf ? 7 - (py & 7) : (py & 7);
+      const uint16_t adr = (b.charBase + (tile & 0x3ff) * tileWords + fy) & 0x7fff;
+      const uint16_t w0 = vram[adr];
+      const uint16_t w1 = bpp >= 4 ? vram[(adr + 8) & 0x7fff] : 0;
+      const uint16_t w2 = bpp == 8 ? vram[(adr + 16) & 0x7fff] : 0;
+      const uint16_t w3 = bpp == 8 ? vram[(adr + 24) & 0x7fff] : 0;
+      const uint64_t* T = hf ? kSpreadFwd : kSpreadRev;
+      uint64_t v = T[w0 & 0xff] | (T[w0 >> 8] << 1);
+      if (bpp >= 4) v |= (T[w1 & 0xff] << 2) | (T[w1 >> 8] << 3);
+      if (bpp == 8) v |= (T[w2 & 0xff] << 4) | (T[w2 >> 8] << 5) | (T[w3 & 0xff] << 6) | (T[w3 >> 8] << 7);
+      std::memcpy(pix, &v, 8);  // (byte c: pixel c, as renderBg's loop puts them)
+    }
+    const uint8_t p = pix[px & 7];
+    if (!p) {
+      out[x].pri = 0;
+      continue;
+    }
+    uint16_t col;
+    if (direct) col = directColor(p, cPal);
+    else if (bpp == 8) col = cgram[p];
+    else if (bpp == 4) col = cgram[(cPal << 4) + p];
+    else col = cgram[palBase + (cPal << 2) + p];
+    out[x].col = col;
+    out[x].pri = cPri;
+    out[x].pal = cPal;
+  }
+}
+
 void Ppu::renderBg(int l, int row, int x0, int x1) {
   Px* out = layer_[l] + kMaxExt;
   const Bg& b = bg_[l];
@@ -519,6 +653,10 @@ void Ppu::renderBg(int l, int row, int x0, int x1) {
   int tileShift = b.bigTiles ? 4 : 3;
   if (msize == 1 && !opt) {
     renderBgFast(l, row, x0, x1);
+    return;
+  }
+  if (msize == 1) {
+    renderBgOpt(l, row, x0, x1);
     return;
   }
 
@@ -793,40 +931,67 @@ void Ppu::renderObj(int row, int x0, int x1) {
 }
 
 void Ppu::computeWindows(int x0, int x1) {
+  // The masks only change when a window register, the shift or the span changes: usually not from one line to the
+  // next, so then they are as the last line left them. (Also what a hit has to be told: loadState and reset forget.)
+  // (Maui Mallard's port, the same masks: per pixel, a window outside the screen in mode 1 is nothing, so a layer's
+  // window there is its inversion bit, as before; elsewhere the edge pixel's.)
+  WinKey key;
+  std::memset(&key, 0, sizeof key);
+  std::memcpy(key.sel, winSel_, sizeof key.sel);
+  std::memcpy(key.logic, winLogic_, sizeof key.logic);
+  key.l[0] = winL_[0], key.l[1] = winL_[1], key.r[0] = winR_[0], key.r[1] = winR_[1];
+  key.shift = winShift;
+  key.mode = wideWindowMode;
+  key.x0 = x0;
+  key.x1 = x1;
+  if (winKeyValid_ && std::memcmp(&key, &winKey_, sizeof key) == 0) return;
+  winKey_ = key;
+  winKeyValid_ = true;
+
+  // Each window's inside, once for the line (the layers then only combine and invert them).
+  bool need[2] = {false, false};
   for (int l = 0; l < 6; l++) {
-    uint8_t sel = winSel_[l];
-    uint8_t* m = winMask_[l] + kMaxExt;
-    bool en1 = sel & 2, en2 = sel & 8;
-    if (!en1 && !en2) {
-      for (int x = x0; x < x1; x++) m[x] = 0;
-      continue;
-    }
-    bool inv1 = sel & 1, inv2 = sel & 4;
-    int logic = winLogic_[l];
+    need[0] |= (winSel_[l] & 2) != 0;
+    need[1] |= (winSel_[l] & 8) != 0;
+  }
+  uint8_t in[2][kLineW];
+  for (int w = 0; w < 2; w++) {
+    if (!need[w]) continue;
+    uint8_t* o = in[w] + kMaxExt;
+    const int lo = winL_[w], hi = winR_[w];
     for (int x = x0; x < x1; x++) {
       int ex = x - winShift;
-      bool w1, w2;
       if ((ex < 0 || ex > 255) && wideWindowMode == 1) {
-        w1 = inv1;
-        w2 = inv2;
-      } else {
-        if (ex < 0) ex = 0;
-        if (ex > 255) ex = 255;
-        w1 = (ex >= winL_[0] && ex <= winR_[0]) != inv1;
-        w2 = (ex >= winL_[1] && ex <= winR_[1]) != inv2;
+        o[x] = 0;
+        continue;
       }
-      bool r;
-      if (en1 && !en2) r = w1;
-      else if (!en1 && en2) r = w2;
-      else {
-        switch (logic) {
-          case 0: r = w1 || w2; break;
-          case 1: r = w1 && w2; break;
-          case 2: r = w1 != w2; break;
-          default: r = w1 == w2; break;
-        }
+      if (ex < 0) ex = 0;
+      if (ex > 255) ex = 255;
+      o[x] = ex >= lo && ex <= hi;
+    }
+  }
+  for (int l = 0; l < 6; l++) {
+    const uint8_t sel = winSel_[l];
+    uint8_t* m = winMask_[l] + kMaxExt;
+    const bool en1 = sel & 2, en2 = sel & 8;
+    if (!en1 && !en2) {
+      std::memset(m + x0, 0, (size_t)(x1 - x0));
+      continue;
+    }
+    const uint8_t inv1 = sel & 1, inv2 = (sel >> 2) & 1;
+    const uint8_t* a = in[0] + kMaxExt;
+    const uint8_t* b = in[1] + kMaxExt;
+    if (en1 && !en2) {
+      for (int x = x0; x < x1; x++) m[x] = a[x] ^ inv1;
+    } else if (!en1 && en2) {
+      for (int x = x0; x < x1; x++) m[x] = b[x] ^ inv2;
+    } else {
+      switch (winLogic_[l]) {
+        case 0: for (int x = x0; x < x1; x++) m[x] = (a[x] ^ inv1) | (b[x] ^ inv2); break;
+        case 1: for (int x = x0; x < x1; x++) m[x] = (a[x] ^ inv1) & (b[x] ^ inv2); break;
+        case 2: for (int x = x0; x < x1; x++) m[x] = (a[x] ^ inv1) ^ (b[x] ^ inv2); break;
+        default: for (int x = x0; x < x1; x++) m[x] = ((a[x] ^ inv1) ^ (b[x] ^ inv2)) ^ 1; break;
       }
-      m[x] = r;
     }
   }
 }
@@ -839,19 +1004,26 @@ void Ppu::computeWindows(int x0, int x1) {
 // mirrored or the margin left transparent (edge modes 1-3).
 void Ppu::edgeRemap(int l, PpuLayerRemap* rm) {
   const Px* src = layer_[l] + kMaxExt;
-  auto same = [&](int a, int b) {
-    return src[a].pri == src[b].pri && (src[a].pri == 0 || src[a].col == src[b].col);
-  };
+  // (each pixel as one number, two the same exactly when their numbers are: both transparent, or the same
+  // priority and colour; per side, in order from the edge inwards)
+  uint32_t edgeKey[2][256];
+  for (int k = 0; k < 256; k++) {
+    const Px& a = src[k];
+    const Px& b = src[255 - k];
+    edgeKey[0][k] = a.pri ? (1u << 24) | ((uint32_t)a.pri << 16) | a.col : 0u;
+    edgeKey[1][k] = b.pri ? (1u << 24) | ((uint32_t)b.pri << 16) | b.col : 0u;
+  }
   // (pixel at step k from the edge inwards)
   auto at = [](bool right, int k) { return right ? 255 - k : k; };
   auto find = [&](bool right, int* skip, int* period) {
+    const uint32_t* e = edgeKey[right ? 1 : 0];
     // (a blank edge column: all transparent or one colour, unlike the next)
-    bool blank = !same(at(right, 0), at(right, 8));
-    for (int k = 1; k < 8 && blank; k++) blank = same(at(right, 0), at(right, k));
+    bool blank = e[0] != e[8];
+    for (int k = 1; k < 8 && blank; k++) blank = e[0] == e[k];
     for (int s = 0; s <= (blank ? 8 : 0); s += 8)
       for (int p = 1; p <= 96; p++) {
         int n = std::max(32, 2 * p), k = 0;
-        while (k < n && s + k + p < 256 && same(at(right, s + k), at(right, s + k + p))) k++;
+        while (k < n && s + k + p < 256 && e[s + k] == e[s + k + p]) k++;
         if (k == n) {
           *skip = s;
           *period = p;
@@ -863,7 +1035,23 @@ void Ppu::edgeRemap(int l, PpuLayerRemap* rm) {
     return false;
   };
   int sl, pl, sr, pr;
-  bool fl = find(false, &sl, &pl), fr = find(true, &sr, &pr);
+  bool fl, fr;
+  EdgeFind* memo = nullptr;
+  if (remapRow_ >= 0 && remapRow_ < kFrameH && l < 4) {
+    if (edgeFind_.empty()) edgeFind_.resize(4 * kFrameH);
+    memo = &edgeFind_[l * kFrameH + remapRow_];
+  }
+  if (memo && memo->valid && std::memcmp(memo->key, edgeKey, sizeof edgeKey) == 0) {
+    fl = memo->fl, fr = memo->fr, sl = memo->sl, pl = memo->pl, sr = memo->sr, pr = memo->pr;
+  } else {
+    fl = find(false, &sl, &pl);
+    fr = find(true, &sr, &pr);
+    if (memo) {
+      memo->valid = true;
+      memo->fl = fl, memo->fr = fr, memo->sl = sl, memo->pl = pl, memo->sr = sr, memo->pr = pr;
+      std::memcpy(memo->key, edgeKey, sizeof edgeKey);
+    }
+  }
   int L = extL, R = extR, DL = rm->mirror ? rm->mirror : L, DR = rm->mirror ? rm->mirror : R;
   if (rm->mirror == 0xff) {
     // The shape the edge cuts through: from the edge (or up to 16 px in, as
@@ -912,10 +1100,19 @@ void Ppu::applyRemap(int l, int x0, int x1) {
   for (int s = 0; s < rm.count; s++) {
     const PpuRemapSeg& sg = rm.seg[s];
     int a = std::max<int>(sg.dst0, x0), b = std::min<int>(sg.dst1, x1);
+    if (sg.period > 0) {
+      // (src0 + (x - dst0) mod period, the remainder stepped along instead of divided out each pixel)
+      int m = a < b ? floorMod(a - sg.dst0, sg.period) : 0;
+      for (int x = a; x < b; x++) {
+        const int sx = sg.src0 + m;
+        if (++m == sg.period) m = 0;
+        if (sx < x0 || sx >= x1) continue;
+        dst[x] = src[sx];
+      }
+      continue;
+    }
     for (int x = a; x < b; x++) {
-      int sx = sg.period > 0   ? sg.src0 + floorMod(x - sg.dst0, sg.period)
-               : sg.period < 0 ? sg.src0 - (x - sg.dst0)
-                               : sg.src0 + (x - sg.dst0);
+      int sx = sg.period < 0 ? sg.src0 - (x - sg.dst0) : sg.src0 + (x - sg.dst0);
       if (sx < x0 || sx >= x1) continue;
       dst[x] = src[sx];
     }
@@ -940,6 +1137,7 @@ void Ppu::renderLine(int line) {
   }
   hideWideObj = false;
   maskWide = false;
+  keepWide = false;
   subStill = false;
   dimLeft = dimRight = 0;
   wideWindowMode = 0;
@@ -985,9 +1183,16 @@ void Ppu::renderLine(int line) {
       for (int x = x0; x < x1; x++) o[x].pri = 0;
       continue;
     }
+    // (A layer the hook carries on from the screen's edges (edge remap) has its margins drawn over from the
+    // screen's own pixels: nothing drawn there is ever looked at, so it isn't drawn: SMB2's menus, the bonus.)
+    const bool keepHide = hideWideBg[l];
+    if (layerRemap[l].edge) hideWideBg[l] = true;
     if (mode_ == 7) renderMode7(l, row, x0, x1);
     else renderBg(l, row, x0, x1);
+    hideWideBg[l] = keepHide;
+    remapRow_ = row;
     applyRemap(l, x0, x1);
+    remapRow_ = -1;
   }
   if (used & 0x10) {
     renderObj(row, x0, x1);
@@ -1310,7 +1515,7 @@ struct Ppu::ComposeParams {
   uint16_t fixed, backdrop;
   uint8_t cgwsel, cgadsub, tm, ts, tmw, tsw;
   int dimLeft, dimRight, x0, x1, eL, eR;
-  bool maskWide;
+  bool maskWide, keepWide;
   int wideShowLo, wideShowHi;
   const uint8_t* lut;
   const Px* layer[5];
@@ -1336,6 +1541,12 @@ void Ppu::composeCore(const ComposeParams& p) {
   const bool halfFlag = p.cgadsub & 0x40;
   const uint8_t* lut = p.lut;
   const uint8_t* colWin = p.win[5] + kMaxExt;
+  // (keepWide: the margins as the last frame left them, see Ppu::keepWide)
+  uint32_t keptL[kMaxExt], keptR[kMaxExt];
+  if (p.keepWide) {
+    std::memcpy(keptL, fb + kMaxExt - eL, sizeof(uint32_t) * eL);
+    std::memcpy(keptR, fb + kMaxExt + 256, sizeof(uint32_t) * eR);
+  }
 
   // The layers that are on the screen (and on the subscreen) and have something drawn on this line, each
   // with a small table from a pixel's priority to where that (layer, priority) stands in the front-to-back
@@ -1353,9 +1564,22 @@ void Ppu::composeCore(const ComposeParams& p) {
   for (int l = 0; l < 5; l++) {
     if (!(onMask & (1 << l))) continue;
     const Px* q = p.layer[l] + kMaxExt;
-    uint32_t any = 0;
-    for (int x = x0; x < x1; x++) any |= q[x].pri;
-    if (!any) continue;
+    // (all the line's pixels OR'ed together as 32-bit words, the priority bytes looked at once at the end: one
+    // pass the compiler does in vector registers)
+    static_assert(sizeof(Px) == 4 && offsetof(Px, pri) == 2, "Px: 4 bytes, the priority third");
+    uint32_t acc = 0;
+    {
+      const uint8_t* b = reinterpret_cast<const uint8_t*>(q + x0);
+      const int n = x1 - x0;
+      for (int i = 0; i < n; i++) {
+        uint32_t w;
+        std::memcpy(&w, b + 4 * i, 4);
+        acc |= w;
+      }
+    }
+    uint8_t accB[4];
+    std::memcpy(accB, &acc, 4);
+    if (!accB[offsetof(Px, pri)]) continue;
     Sel s;
     s.px = q;
     for (int v = 0; v < 8; v++) s.key[v] = 0xFF;
@@ -1393,15 +1617,23 @@ void Ppu::composeCore(const ComposeParams& p) {
       const int mainL = best == 0xFF ? 5 : (int)(best & 7);
       const uint16_t mainC = best == 0xFF ? backdrop : p.layer[mainL][xi].col;
       const int r = mainC & 31, g = (mainC >> 5) & 31, b = (mainC >> 10) & 31;
-      const int dim = x < 0 ? p.dimLeft : x >= 256 ? p.dimRight : 0;
+      int dim = x < 0 ? p.dimLeft : x >= 256 ? p.dimRight : 0;
       if (dim > 0 && mainL != 4) {  // (the margins' scenery; sprites, the HUD, as they are)
-        const int k = 256 - dim;
+        int k = 256 - dim;
         fb[xi] = (uint32_t(lut[r] * k >> 8) << 16) | (uint32_t(lut[g] * k >> 8) << 8) | (lut[b] * k >> 8);
       } else {
         fb[xi] = (uint32_t(lut[r]) << 16) | (uint32_t(lut[g]) << 8) | lut[b];
       }
     }
   } else {
+    // (what the colour window decides, for a pixel outside it and inside: clipping, colour math; and which layers
+    // take part in the math (the sprites only with palettes 4-7, below))
+    bool clipT[2], mathT[2], layerMathT[6];
+    for (int cw = 0; cw < 2; cw++) {
+      clipT[cw] = clipMode == 3 || (clipMode == 1 && !cw) || (clipMode == 2 && cw);
+      mathT[cw] = mathMode == 0 || (mathMode == 1 && cw) || (mathMode == 2 && !cw);
+    }
+    for (int l = 0; l < 6; l++) layerMathT[l] = l == 4 ? (p.cgadsub & 0x10) != 0 : (p.cgadsub & (1 << l)) != 0;
     for (int x = x0; x < x1; x++) {
       const int xi = x + kMaxExt;
       int mainL = 5, subL = 5;
@@ -1420,12 +1652,10 @@ void Ppu::composeCore(const ComposeParams& p) {
           subC = p.layer[subL][xi].col;
         }
       }
-      bool cw = colWin[x];
-      bool clip = clipMode == 3 || (clipMode == 1 && !cw) || (clipMode == 2 && cw);
-      bool mathOk = mathMode == 0 || (mathMode == 1 && cw) || (mathMode == 2 && !cw);
-      bool layerMath;
-      if (mainL == 4) layerMath = (p.cgadsub & 0x10) && mainPal >= 4;
-      else layerMath = p.cgadsub & (1 << mainL);
+      const int cw = colWin[x] ? 1 : 0;
+      const bool clip = clipT[cw];
+      const bool mathOk = mathT[cw];
+      const bool layerMath = layerMathT[mainL] && (mainL != 4 || mainPal >= 4);
 
       int r = mainC & 31, g = (mainC >> 5) & 31, b = (mainC >> 10) & 31;
       if (clip) r = g = b = 0;
@@ -1467,6 +1697,10 @@ void Ppu::composeCore(const ComposeParams& p) {
   }
   for (int x = -eL; x < std::min(0, p.wideShowLo); x++) fb[x + kMaxExt] = 0;
   for (int x = std::max(256, p.wideShowHi); x < 256 + eR; x++) fb[x + kMaxExt] = 0;
+  if (p.keepWide) {
+    std::memcpy(fb + kMaxExt - eL, keptL, sizeof(uint32_t) * eL);
+    std::memcpy(fb + kMaxExt + 256, keptR, sizeof(uint32_t) * eR);
+  }
 }
 
 void Ppu::runCompose(void* job, void*) { composeCore(static_cast<ComposeJob*>(job)->p); }
@@ -1505,6 +1739,7 @@ void Ppu::composeLine(uint32_t* fb, int x0, int x1, int eL, int eR, bool async) 
   p->eL = eL;
   p->eR = eR;
   p->maskWide = maskWide;
+  p->keepWide = keepWide;
   p->wideShowLo = wideShowLo;
   p->wideShowHi = wideShowHi;
   if (!job) {
@@ -1652,6 +1887,7 @@ void Ppu::saveState(uint8_t* dst) const {
 }
 
 void Ppu::loadState(const uint8_t* src) {
+  winKeyValid_ = false;
   const uint8_t* p = src;
 #define X(f) getv(p, f);
   PPU_STATE_FIELDS(X)

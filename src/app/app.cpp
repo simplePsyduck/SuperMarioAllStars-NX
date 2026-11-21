@@ -21,7 +21,7 @@
 #include "core/png.h"
 
 const wchar_t* kAppTitle = L"Super Mario All-Stars";
-const char* kAppVersion = "1.1.1";
+const char* kAppVersion = "1.1.2";
 namespace {
 const char* kExpectedTitle = "SUPER MARIO ALL_STARS";
 constexpr uint32_t kKnownCrc = 0x925637c7;  // Super Mario All-Stars (USA)
@@ -97,7 +97,9 @@ bool App::loadRom() {
   game.reset();  // (before the Snes it points at: its destructor uses it)
   snes = std::make_unique<Snes>();
 #ifdef __SWITCH__
-  snes->ppu.setThreaded(cfg.threadedVideo);  // (the picture's layers mixed on a second core)
+  // (the picture's layers mixed on a second core: always, where the platform offers one (Ppu::queueFactory). It is a
+  // third of the emulation thread's work and costs nothing else; it was switch.threaded_video, no longer a setting.)
+  snes->ppu.setThreaded(true);
 #endif
   // (the console's copy patched for an MSU-1 pack if one is chosen; the
   // launcher's previews run the ROM as it is)
@@ -500,7 +502,7 @@ void App::applyConfig() {
   launcher.setConfirmRight(cfg.confirmRight);
   if (snes) snes->ppu.noSpriteLimit = cfg.noSpriteLimit;
 #ifdef __SWITCH__
-  if (snes) snes->ppu.setThreaded(cfg.threadedVideo);
+  if (snes && !snes->ppu.threaded() && !videoThreadFailed) snes->ppu.setThreaded(true);
 #endif
   if (snes) {
     snes->apu.dsp.musicGain = cfg.musicVolume * 256 / 100;
@@ -1091,8 +1093,8 @@ std::shared_ptr<MenuPage> App::pageOptions() {
     rw.enabled = [this]() { return !achLocked(); };
     rw.valueText = [this]() { return std::string(achLocked() ? "Off (achievements on)" : ""); };
     pg.items.push_back(rw);
-    // (Switch CPU clock and video thread are not in the menu on purpose: they are set in smas_port.ini,
-    // [switch] cpu_clock (0 stock) and threaded_video (1 on), so they cannot be changed by accident)
+    // (Switch CPU clock is not in the menu on purpose: it is set in smas_port.ini, [switch] cpu_clock (0 stock), so
+    // it cannot be changed by accident. The video thread is always on: no setting.)
     // (right under what it switches off)
     pg.items.push_back(MenuItem::header("Achievements"));
     pg.items.push_back(achievementsSwitch());

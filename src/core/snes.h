@@ -25,8 +25,30 @@ public:
   void runFrame();
 
   // CPU bus interface
-  uint8_t cpuRead(uint32_t adr);
-  void cpuWrite(uint32_t adr, uint8_t val);
+  // (inline: the CPU's every access. A page table (8 KB pages) for the memory reads and the WRAM writes, a table for
+  // the access times; I/O, SRAM writes and the watched or hooked accesses take the old way. The same accesses, times
+  // and events as before, only fewer branches and calls.)
+  uint8_t cpuRead(uint32_t adr) {
+    const uint32_t pg = (adr >> 13) & 0x7ff;
+    int t = atPage_[fastRom_][pg];
+    if (!t) t = accessTime(adr);
+    tick(t >> cpuFast_);  // (6, 8, 12: halved exactly; see setCpuFast)
+    const uint8_t* p = rdPage_[pg];
+    const uint8_t v = p ? p[adr & 0x1fff] : busRead(adr);
+    openBus_ = v;
+    if (rwatchFn_) readWatched(adr, v);
+    return v;
+  }
+  void cpuWrite(uint32_t adr, uint8_t val) {
+    const uint32_t pg = (adr >> 13) & 0x7ff;
+    int t = atPage_[fastRom_][pg];
+    if (!t) t = accessTime(adr);
+    tick(t >> cpuFast_);
+    openBus_ = val;
+    uint8_t* p = wrPage_[pg];
+    if (p && !watchFn_ && !nWriteHooks_) p[adr & 0x1fff] = val;
+    else writeSlow(adr, val);
+  }
   void cpuIdle() { tick(cpuFast_ ? 3 : 6); }
   // The CPU at twice its speed (each of its cycles half as long; the PPU, DMA
   // and sound chip as ever): co-op runs the player's code twice a frame and
@@ -191,7 +213,24 @@ private:
 
   size_t romMask_ = 0;
 
-  void tick(int mc);
+  // Most accesses end before the line's next event: then only the counters move (tickSlow is the old loop).
+  void tick(int mc) {
+    const int nh = hPos_ + mc;
+    if (nh < evPos_[evIdx_]) {
+      hPos_ = (uint16_t)nh;
+      cycles_ += mc;
+      if (autoJoyTimer_ > 0) autoJoyTimer_ -= mc;
+      return;
+    }
+    tickSlow(mc);
+  }
+  void tickSlow(int mc);
+  void readWatched(uint32_t adr, uint8_t v);
+  void writeSlow(uint32_t adr, uint8_t v);
+  void buildPages();
+  const uint8_t* rdPage_[2048] = {};  // per 8 KB page of the 24-bit bus: its memory, or null (I/O, open bus: busRead)
+  uint8_t* wrPage_[2048] = {};        // the same for writes: WRAM only
+  uint8_t atPage_[2][2048] = {};      // access time per page, [fastRom_]; 0 = mixed page (accessTime)
   void buildLineEvents();
   void processEvent(int pos, int& extra);
   void newLine();

@@ -61,6 +61,7 @@ void Smb1Engine::fireInit(uint8_t bankLo, uint8_t bankHi) {
       injExit_ = j + 0x27;
     }
   carryInit(bankLo, bankHi);  // (Pick Up & Carry Koopa Shells: smb1carry.cpp)
+  luigiInit(bankLo, bankHi);  // (1P Luigi game: smb1luigi.cpp)
   fbCore_ = fbRet_ = 0;
   const uint32_t f = findSig(kSigProcFire, sizeof(kSigProcFire) / 2, bankLo, bankHi);
   if (!f) return;

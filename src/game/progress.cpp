@@ -10,7 +10,7 @@ void ProgressKeeper::markExec(Snes& snes) {
   for (uint32_t b : {0x000000u, 0x800000u})
     for (uint32_t pc : {kSmb3MaskAnd, kSmb1GoLevel, kSmb1GoArea, kSmb1SaveNewLevel, kSmb1SaveNewArea,
                         kSmb1SaveKeepLevel, kSmb1SaveKeepArea, kMenuFileLevel, kSmb1LoadArea, kSaveSmb1, kSaveLl,
-                        kSaveSmb3})
+                        kSaveSmb3, kSaveSmb2, kSmb2Hearts})
       snes.markExec(pc | b, true);
 }
 
@@ -48,12 +48,18 @@ bool ProgressKeeper::onExec(uint32_t pc, int game, Smb1Engine* e) {
     return true;
   }
   if (!enabled) return false;
-  if (pc == kSaveSmb1 || pc == kSaveLl || pc == kSaveSmb3) {
+  if (pc == kSaveSmb1 || pc == kSaveLl || pc == kSaveSmb3 || pc == kSaveSmb2) {
     // A save starts: the power-up as it is now (written with the save, at the frame's end).
-    const int g = pc == kSaveSmb1 ? (int)GameId::SMB1 : pc == kSaveLl ? (int)GameId::SMBLL : (int)GameId::SMB3;
+    const int g = pc == kSaveSmb1 ? (int)GameId::SMB1
+                  : pc == kSaveLl ? (int)GameId::SMBLL
+                  : pc == kSaveSmb2 ? (int)GameId::SMB2
+                                    : (int)GameId::SMB3;
     if (g != game) return false;
     powerSaveGame_ = g;
-    if (g == (int)GameId::SMB3) {
+    if (g == (int)GameId::SMB2) {
+      powerSave_[0] = w[0x04c4];  // (the extra hearts: the character doesn't matter)
+      powerSave_[1] = 0;
+    } else if (g == (int)GameId::SMB3) {
       powerSave_[0] = w[0x0747];
       powerSave_[1] = w[0x0748];
     } else {
@@ -62,9 +68,17 @@ bool ProgressKeeper::onExec(uint32_t pc, int game, Smb1Engine* e) {
     }
     return false;
   }
+  if (pc == kSmb2Hearts) {
+    // A level starts, its life meter about to be filled: a file's extra hearts given back first.
+    if (game == (int)GameId::SMB2 && powerLoad_ == game) {
+      applyPower(game);
+      powerLoad_ = 0;
+    }
+    return false;
+  }
   if (pc == kMenuFileLevel) {
     // The file panel's setup, Super Mario Bros.'s files: their saved level, as The Lost Levels'.
-    if ((r.y & 3) != 0) return false;
+    if ((r.y & 3) != 0 && (r.y & 3) != 2) return false;  // (Super Mario Bros.'s and Super Mario Bros. 2's)
     r.pc = (uint16_t)kMenuFileLevelLl;
     return true;
   }
@@ -137,7 +151,11 @@ bool ProgressKeeper::onExec(uint32_t pc, int game, Smb1Engine* e) {
 namespace {
 constexpr int kRecBase = 0x0600, kRecSize = 0x110, kRecHead = 4, kFileSize = 0x120;
 int gameIndex(int game) {
-  return game == (int)GameId::SMB1 ? 0 : game == (int)GameId::SMBLL ? 1 : game == (int)GameId::SMB3 ? 2 : -1;
+  return game == (int)GameId::SMB1    ? 0
+         : game == (int)GameId::SMBLL ? 1
+         : game == (int)GameId::SMB3  ? 2
+         : game == (int)GameId::SMB2  ? 3
+                                      : -1;
 }
 }  // namespace
 
@@ -147,9 +165,16 @@ int ProgressKeeper::partOf(int game, int* size) {
     case 0: *size = 9; return 0x00;
     case 1: *size = 8; return 0x09;
     case 2: *size = 0x106; return 0x1a;
+    case 3: *size = 9; return 0x11;
   }
   *size = 0;
   return -1;
+}
+
+// (SMB1, LL and SMB3: three per file from $0600; SMB2's after them, one per file: $12C0 on)
+int ProgressKeeper::recordAt(int file, int game) {
+  const int g = gameIndex(game);
+  return g == 3 ? kRecBase + (12 + file) * kRecSize : kRecBase + (file * 3 + g) * kRecSize;
 }
 
 // The loaded file's record for this game ($70:0004: the file's offset for the game playing).
@@ -160,7 +185,7 @@ bool ProgressKeeper::recordFor(int game, int* at) const {
   const int off = snes_.sram[4] | snes_.sram[5] << 8;
   const int file = off / kFileSize;
   if (file > 3 || off % kFileSize != part) return false;
-  *at = kRecBase + (file * 3 + gameIndex(game)) * kRecSize;
+  *at = recordAt(file, game);
   const uint8_t* r = snes_.sram + *at;
   return r[0] == 'P' && r[3] == gameIndex(game) && std::memcmp(r + kRecHead, snes_.sram + 0x10 + off, size) == 0;
 }
@@ -171,7 +196,7 @@ void ProgressKeeper::writePower(int game) {
   const int off = snes_.sram[4] | snes_.sram[5] << 8;
   const int file = off / kFileSize;
   if (part < 0 || file > 3 || off % kFileSize != part) return;
-  uint8_t* r = snes_.sram + kRecBase + (file * 3 + gameIndex(game)) * kRecSize;
+  uint8_t* r = snes_.sram + recordAt(file, game);
   r[0] = 'P';
   r[1] = powerSave_[0];
   r[2] = powerSave_[1];
@@ -186,7 +211,12 @@ bool ProgressKeeper::applyPower(int game) {
   uint8_t* w = snes_.wram;
   const uint8_t* r = snes_.sram + at;
   static const char* kSuits[] = {"Small", "Super", "Fire", "Raccoon", "Frog", "Tanooki", "Hammer"};
-  if (game == (int)GameId::SMB3) {
+  if (game == (int)GameId::SMB2) {
+    // (called as the level starts: the meter is then filled from $04C4, $11:CBEE)
+    const uint8_t extra = r[1] <= 2 ? r[1] : 0;
+    w[0x04c4] = extra;
+    if (extra) message_ = std::to_string(2 + extra) + " hearts restored";
+  } else if (game == (int)GameId::SMB3) {
     // (on the map: the suit the next level starts with, $23:C0DE)
     if (w[0x070a] != 0 || w[0x0100] != 0xc0) return false;  // (not yet: the map isn't up)
     w[0x0747] = r[1] < 7 ? r[1] : 0;
@@ -216,7 +246,10 @@ void ProgressKeeper::frame(int game) {
     if (powerSaveGame_ == game) writePower(game);
     powerSaveGame_ = 0;
   }
-  if (powerLoad_ && (powerLoad_ != game || !enabled || --powerWait_ <= 0 || applyPower(game))) powerLoad_ = 0;
+  // (SMB2's are given as its level starts, however long the story and the character pick take: see onExec)
+  if (powerLoad_ && (powerLoad_ != game || !enabled ||
+                     (game != (int)GameId::SMB2 && (--powerWait_ <= 0 || applyPower(game)))))
+    powerLoad_ = 0;
   const uint8_t* w = snes_.wram;
   if (game == (int)GameId::SMB1 && w[0x0770] == 1) {  // (OperMode: playing)
     lastWorld_ = w[0x075f];

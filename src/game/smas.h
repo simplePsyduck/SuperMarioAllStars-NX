@@ -141,7 +141,9 @@ private:
   bool parade_ = false;        // SMB2's ending parade: its crowd strip round its 256 px
   uint16_t paradeBg_ = 0;
   bool paradeFull_[32] = {};
-  int wipeFrames_ = 0;  // an SMB2 picture being wiped in: black margins
+  int wipeFrames_ = 0;  // an SMB2 picture being wiped in: its margins kept as they were (Ppu::keepWide)
+  bool wipeNow_ = false;  // (the wipe seen at this frame's first line: see beginLine)
+  bool wipeSliding() const;
   int selectLattice(Ppu& ppu, int ty, int x, uint16_t* entry);
   bool latticeValid_ = false;  // its frame's edge tiles, taken as it appears
   uint16_t latticeL_[32] = {}, latticeR_[32] = {};

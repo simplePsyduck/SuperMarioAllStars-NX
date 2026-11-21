@@ -1010,7 +1010,12 @@ int Smb2Engine::playerReachesEdge() const {
     const int dr[] = {1, -1, 0, 0}, dc[] = {0, 0, 1, -1};
     for (int k = 0; k < 4; k++) {
       int rr = r + dr[k], cc = c + dc[k];
-      if (rr < 0 || rr >= rows || rr < top || rr > bottom || seen[rr * 16 + cc] || !open(rr, cc)) continue;
+      // (cc must be checked too: at a side edge it is -1 or 16, which indexed `seen` a row off, and
+      // before its first byte at row 0 / past its last at the bottom row. That wrote into the heap
+      // around the buffer: a crash when it was freed. An edge column is where the fill stops.)
+      if (rr < 0 || rr >= rows || cc < 0 || cc > 15 || rr < top || rr > bottom || seen[rr * 16 + cc] ||
+          !open(rr, cc))
+        continue;
       seen[rr * 16 + cc] = 1;
       todo.push_back(rr * 16 + cc);
     }
@@ -1035,6 +1040,28 @@ bool Smb2Engine::openVertical() const {
 // wall, a face carried on came out in stripes). Elsewhere nothing, the layers
 // behind showing. (An area never blank at its edges is walled all the way.)
 int Smb2Engine::openVerticalTile(int tx, int ty, int screenX, uint16_t* entry, bool oneScreen, int* keyOut) const {
+  // What the answer depends on besides the tile: WRAM and the line's state (the same while one line is drawn: the
+  // emulated clock stands still then), BG1's scroll, the margins, and of screenX only its 16 px column (the edge
+  // tests at 0, 16, 128, 240 and 256, the columns out from the edge) and whether it is in the margin's last 16 px.
+  if (keyOut) return openVerticalTileRaw(tx, ty, screenX, entry, oneScreen, keyOut);
+  const uint64_t stamp = snes_.masterCycles();
+  const int col = screenX >> 4;
+  const bool last = screenX < 0 ? screenX < -extL_ + 16 : screenX >= 256 + extR_ - 16;
+  OvtMemo& m = ovtMemo_;
+  if (m.stamp == stamp && m.tx == tx && m.ty == ty && m.col == col && m.last == last && m.oneScreen == oneScreen &&
+      m.vofs == bg1Vofs_ && m.extL == extL_ && m.extR == extR_) {
+    if (m.r == PpuHooks::kWideEntry) *entry = m.e;
+    return m.r;
+  }
+  uint16_t e = 0;
+  const int r = openVerticalTileRaw(tx, ty, screenX, &e, oneScreen, nullptr);
+  if (r == PpuHooks::kWideEntry) *entry = e;
+  m.stamp = stamp, m.tx = tx, m.ty = ty, m.col = col, m.last = last, m.oneScreen = oneScreen;
+  m.vofs = bg1Vofs_, m.extL = extL_, m.extR = extR_, m.r = r, m.e = e;
+  return r;
+}
+
+int Smb2Engine::openVerticalTileRaw(int tx, int ty, int screenX, uint16_t* entry, bool oneScreen, int* keyOut) const {
   const uint8_t* w = snes_.wram;
   int base = 0x2000 + (ram(0x0534) & 0x0f) * 0xb00, pages = ram(0x0541) + 1;
   int camY = ram(0x00ca) << 8 | ram(0x00cb);
@@ -1366,7 +1393,34 @@ int Smb2Engine::layerScrollX(int layer) const {
 
 // A jar's scenery layer joins up at the screen's edges unless rows show
 // something on one side and nothing (the layer's commonest tile) on the other.
+// jarEdges works only from the inputs kept in JarInputs (and leaves openMirror_, openBlank_ and openKeep_ as they
+// were when the area is neither open nor walled), so when they are all as last time its results stand as they are:
+// most frames (the map and scroll still) it has nothing new to look at.
 void Smb2Engine::jarEdges(const Ppu& ppu) {
+  if (!jarIn_) jarIn_ = std::make_unique<JarInputs>();
+  JarInputs& in = *jarIn_;
+  bool same = jarInValid_;
+  const bool open = openVertical() || wallTile_[0] >= 0;
+  if (in.open != open) same = false;
+  in.open = open;
+  for (int i = 0; i < 2; i++) {
+    const int l = i + 1;
+    const uint16_t h = ppu.bgHofs(l), v = ppu.bgVofs(l), mb = ppu.bgMapBase(l);
+    const uint8_t ms = ppu.bgMapSize(l);
+    if (in.hofs[i] != h || in.vofs[i] != v || in.mapBase[i] != mb || in.mapSize[i] != ms) same = false;
+    in.hofs[i] = h, in.vofs[i] = v, in.mapBase[i] = mb, in.mapSize[i] = ms;
+    // (every word mapEntry can read for this layer: up to 64x64 entries from the map's base, wrapping at 32K words)
+    const int words = ms == 0 ? 1024 : ms == 3 ? 4096 : 2048;
+    for (int k = 0; k < words; k++) {
+      const uint16_t w = ppu.vram[(mb + k) & 0x7fff];
+      if (in.map[i][k] != w) same = false, in.map[i][k] = w;
+    }
+  }
+  jarInValid_ = true;
+  if (!same) jarEdgesWork(ppu);
+}
+
+void Smb2Engine::jarEdgesWork(const Ppu& ppu) {
   for (int l = 1; l <= 2; l++) {
     int c0 = ppu.bgHofs(l) >> 3, r0 = ppu.bgVofs(l) >> 3;
     auto at = [&](int c, int r) { return ppu.tileEntry(l, (c0 + c) & 63, (r0 + r) & 63); };

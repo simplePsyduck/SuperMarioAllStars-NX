@@ -31,6 +31,7 @@ add_library(main SHARED
   ${SRC}/game/progress.cpp
   ${SRC}/game/smb1fire.cpp
   ${SRC}/game/smb1carry.cpp
+  ${SRC}/game/smb1luigi.cpp
   ${SRC}/game/smb3fire.cpp
   ${SRC}/game/smb1.cpp
   ${SRC}/game/smb1coop.cpp

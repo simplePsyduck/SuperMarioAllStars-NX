@@ -12,7 +12,7 @@ endif
 
 APP_TITLE   := Super Mario All-Stars
 APP_AUTHOR  := Darhkfox & simplePsyduck
-APP_VERSION := 1.1.1
+APP_VERSION := 1.1.2
 TARGET      := SuperMarioAllStars
 BUILD       := build
 ICON        := icon.jpg
@@ -34,7 +34,7 @@ SOURCES := \
   $(SRC)/core/disasm.cpp $(SRC)/core/msu1.cpp \
   $(SRC)/game/smas.cpp $(SRC)/game/smb1.cpp $(SRC)/game/smb1coop.cpp $(SRC)/game/smb2.cpp \
   $(SRC)/game/smb3.cpp $(SRC)/game/smb3coop.cpp $(SRC)/game/achievements.cpp $(SRC)/game/palette.cpp \
-  $(SRC)/game/progress.cpp $(SRC)/game/smb1fire.cpp $(SRC)/game/smb1carry.cpp $(SRC)/game/smb3fire.cpp \
+  $(SRC)/game/progress.cpp $(SRC)/game/smb1fire.cpp $(SRC)/game/smb1carry.cpp $(SRC)/game/smb1luigi.cpp $(SRC)/game/smb3fire.cpp \
   $(SRC)/app/app.cpp $(SRC)/app/config.cpp $(SRC)/app/menu.cpp $(SRC)/app/launcher.cpp \
   $(SRC)/app/music.cpp $(SRC)/app/achstore.cpp $(SRC)/app/utf8.cpp $(SRC)/app/sys_posix.cpp \
   $(SRC)/app/imageload.cpp $(SRC)/app/msupack.cpp $(SRC)/app/achexport.cpp $(SRC)/app/updatecheck.cpp \

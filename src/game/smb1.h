@@ -100,6 +100,7 @@ private:
   bool ok_ = false;
   // signature addresses (24-bit)
   uint32_t spawnOp_ = 0, despawnLOp_ = 0, despawnROp_ = 0;
+  uint32_t spawnAdc_ = 0;  // CheckRightBounds' ADC #$30 (the retainer: see onExec)
   uint32_t blinkLda_ = 0;    // PlayerGfxHandler: LDA InjuryTimer (blink while invincible)
   uint32_t firebarLda_ = 0;  // ProcFirebar: LDA Enemy_OffscreenBits (see kSigFirebar)
   uint32_t firebarWrap_ = 0; // DrawFirebar_Collision: CMP #$59 (see kSigFirebarWrap)
@@ -118,6 +119,7 @@ private:
   uint32_t gameHiFrame_[128] = {};  // frame in which the game wrote each sprite's $0C00 byte
   uint32_t ourHiFrame_[128] = {};   // ... in which its X bit 8 was chosen here (see onWrite)
   bool ourHi_[128] = {};
+  bool ourHiLive_[128] = {};        // ... and not yet cleared by the next game frame's start
   bool firebarDraw_ = false, firebarRel_ = false;  // a firebar is being drawn
   uint32_t firebarColl_ = 0, firebarCollEnd_ = 0;  // a flame's meeting with the player, and its end
   int flameX_ = 0;                                // the flame's true screen X (see firebarWrap_)
@@ -174,8 +176,14 @@ private:
   // Pick Up & Carry Koopa Shells (smb1carry.cpp): PlayerEnemyCollision's touch of enemy X ($03:DE90),
   // its kick of a still shell ($03:DEE7), its way out (RTS, $03:DF14).
   uint32_t carryTouch_ = 0, carryKick_ = 0, carryExit_ = 0;
+  uint32_t carryKnock_ = 0;
+  uint32_t pirOuter_ = 0, pirInner_ = 0;  // (EnemiesCollision's CMP #PiranhaPlant, the enemy's and the other's: see smb1carry.cpp)
+  bool shellMoving(int x) const;  // (ShellOrBlockDefeat's knock-out: LDA $29,X; AND #$1F; ORA #$20; STA $29,X)
   uint16_t carryTouchBits_ = 0;  // ([Enemy_CollisionBits]: bit 0, touching the player last time; SMB1 $0481)
   int carried_ = -1;  // the enemy slot held (-1: none)
+  uint8_t carriedState_ = 0;  // (its [Enemy_State] as a still shell, picked up: put back as it's let go)
+  int thrown_ = -1;   // the slot just let go, its kick still to speed up (-1: none)
+  int throwSpeed_ = 0, throwWait_ = 0;  // (the throw's speed, 1/16 px a frame, away from the player; frames left)
   void carryInit(uint8_t bankLo, uint8_t bankHi);
   bool carryExec(uint32_t pc);
   void carryPlace();  // (its update about to run: beside the player)
@@ -256,7 +264,17 @@ private:
   uint32_t drawSeq_ = 0, ref16Seq_ = 0, relSeq_ = 0;  // which reference came last
   uint32_t groupPlaced_ = 0;              // enemy group start set ($02/$03), see kSigGroup
   uint32_t springSlot_ = 0;               // the jumpspring's object slot chosen, see kSigSpring
+  uint32_t boundErase_ = 0;               // OffscreenBoundsCheck's JSR EraseEnemyObject (see onExec)
+  uint32_t freeSlot_ = 0;                 // FindEmptyEnemySlot for the area's objects (see onExec)
+  uint32_t flagMake_ = 0, flagRts_ = 0;   // the flagpole's flag put in slot 5 (see flagExec)
+  uint32_t flagRoutine_ = 0, flagSlide_ = 0;  // FlagpoleRoutine's LDX #$05, FlagpoleSlide's LDA Enemy_ID+5
+  bool flagMinus_ = true;                 // (SMB1 places it 8 px left of the pole's column, LL 8 px right)
+  int flagSlot_ = 5;                      // the slot the flag is in (5 unless 5 was taken: see flagExec)
+  bool flagExec(uint32_t pc);
   void rescueSpring();                    // a jumpspring left in slot 5 moves to a free enemy slot
+  void holdRetainer();                    // a Toad/Princess come early, not in slot 0, goes back to the list
+  void victoryRetainer();                 // ... and one the axe erased, read again
+  bool retainerSeen_ = false;
   uint32_t bowserBig_[2] = {};            // Bowser's high-table stores that keep 16x16, see kSigBowserHi
   std::vector<uint32_t> edgeSpawnOps_;    // ADC #$20 operands of edge spawns, see kSigEdgeSpawn
   bool hudAnchor_ = true;
@@ -407,6 +425,21 @@ private:
   uint32_t titleInput_ = 0;
   uint32_t livesSet_ = 0;  // just past the lives' start from the save (STA NumberofLives): co-op's at least 10
   int titleCursor_ = 0, titlePick_ = -1;
+  // ---- 1P Luigi game (Super Mario Bros.: the title's 1P MARIO GAME / 1P LUIGI GAME; see smb1luigi.cpp)
+  bool luigiPick_ = false;  // (the title's choice, Left / Right on its first row; kept while the game runs)
+  bool luigiCoop_ = false;  // (a Luigi game in co-op just now: see luigiFrame)
+  bool luigiGame_ = false;  // (a one-player game started as Luigi: [CurrentPlayer] $0753 1, The Lost Levels' Luigi)
+  uint32_t luigiJump_ = 0, luigiFall_ = 0, luigiFriction_ = 0, luigiTurn_ = 0;  // (the physics stores: STA $0709 / $070A / $0702)
+  void luigiInit(uint8_t bankLo, uint8_t bankHi);
+  bool luigiExec(uint32_t pc);
+  void luigiFrame();
+  void luigiTitleText();
+  void luigiTitleFrame(uint8_t mode);
+  bool luigiMenu_ = false;      // (the title's first row up, 1 PLAYER GAME or ours over it)
+  uint16_t luigiPrevPad_ = 0;   // (last frame's buttons: Left / Right as they're pressed)
+public:
+  bool luigiGame() const { return luigiGame_; }
+private:
   uint8_t titleMode_ = 0xff;
   bool titleShown_ = false;
   uint16_t titleTop_[13] = {};  // the TOP- line, moved a row down for room under CO-OP GAME
@@ -446,6 +479,9 @@ private:
   // camera on page $FF.)
   int camera() const { return (int8_t)ram(0x071a) * 256 + ram(0x071c); }
   bool leavesBuilt(int x);
-  int parserPos() const { return (int8_t)ram(0x0725) * 256 + ram(0x0726) * 16; }
+  int parserPos() const { return frozenParser_ >= 0 ? frozenParser_ : (int8_t)ram(0x0725) * 256 + ram(0x0726) * 16; }
+  // (the title fading out after Start: the game has already put its area parser back to 0 for the
+  // level ahead, but the title is still on the screen: the margins go on with the title's columns)
+  int frozenParser_ = -1;
   void trackParser();
 };
